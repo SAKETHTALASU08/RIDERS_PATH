@@ -1,0 +1,7 @@
+{
+  "name": "Riders Path",
+  "description": "Student-only peer-to-peer bike rental marketplace for ICFAI Hyderabad students connecting student bike owners and renters with verified credentials and seamless booking.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
+
