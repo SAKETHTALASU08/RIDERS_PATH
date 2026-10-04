@@ -4,5 +4,12 @@ dist/
 coverage/
 .DS_Store
 *.log
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+data/
+uploads/
 .env*
 !.env.example
+

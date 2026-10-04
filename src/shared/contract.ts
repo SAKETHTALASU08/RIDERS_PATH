@@ -158,7 +158,7 @@ export const BookingCreateSchema = z.object({
   drivingLicenceImage: z.string().min(10, 'Driving Licence scan is required'),
   studentIdCardImage: z.string().min(10, 'ICFAI Student ID card photo is required'),
   agreedToTermsVersion: z.string(),
-  idempotencyKey: z.string().uuid(),
+  idempotencyKey: z.string().min(8),
 });
 export type BookingCreate = z.infer<typeof BookingCreateSchema>;
 
@@ -210,7 +210,7 @@ export const OwnerOnboardingSchema = z.object({
     message: 'You must confirm vehicle ownership, active insurance, and university compliance',
   }),
   termsVersionAgreed: z.string(),
-  idempotencyKey: z.string().uuid(),
+  idempotencyKey: z.string().min(8),
 });
 export type OwnerOnboarding = z.infer<typeof OwnerOnboardingSchema>;
 

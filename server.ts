@@ -1,1055 +1,926 @@
 import express, { Request, Response, NextFunction } from 'express';
 import path from 'path';
-import { createServer as createViteServer } from 'vite';
-import dotenv from 'dotenv';
+import helmet from 'helmet';
+import cors from 'cors';
+import cookieParser from 'cookie-parser';
 import crypto from 'crypto';
-import { db } from './server/db.js';
-import { verifyDocumentWithGemini } from './server/gemini.js';
+import { z } from 'zod';
+import { env } from './server/config/env';
+import { db, runMigrations, sqlite } from './server/db';
+import {
+  requireUser,
+  requireAdmin,
+  verifyCsrfOrigin,
+  STUDENT_SESSION_COOKIE,
+  ADMIN_SESSION_COOKIE,
+} from './server/middleware/auth';
+import {
+  globalLimiter,
+  authLimiter,
+  otpLimiter,
+  bookingLimiter,
+  ownerLimiter,
+  geminiLimiter,
+} from './server/middleware/rateLimit';
+import { documentUpload, verifyMagicBytes } from './server/middleware/upload';
+import { verifyDocumentWithGemini } from './server/gemini';
+import {
+  OtpRequestSchema,
+  OtpVerifySchema,
+  ProfileCompletionSchema,
+  BookingCreateSchema,
+  OwnerOnboardingSchema,
+  PublicBikeDtoSchema,
+  PricingBreakdownSchema,
+} from './src/shared/contract';
+import { PLATFORM_CONFIG } from './src/config/platform.config';
 
-dotenv.config();
+// Initialize Database Schema & Seed Data
+runMigrations();
 
-const app = express();
-const PORT = 3000;
+export const app = express();
 
-// Body parser with 25MB limit for document image uploads
-app.use(express.json({ limit: '25mb' }));
-app.use(express.urlencoded({ extended: true, limit: '25mb' }));
-
-// Active session token store
-const adminSessions = new Set<string>();
-const userSessions = new Map<string, string>(); // token -> userId
-
-// Simple admin auth middleware
-function requireAdmin(req: Request, res: Response, next: NextFunction) {
-  const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return res.status(401).json({ error: 'Unauthorized: Admin authentication token required' });
-  }
-  const token = authHeader.split(' ')[1];
-  if (!adminSessions.has(token)) {
-    return res.status(403).json({ error: 'Forbidden: Invalid or expired admin session' });
-  }
-  next();
-}
+// Trust proxy for secure cookies & accurate IP extraction behind Netlify / reverse proxies
+app.set('trust proxy', 1);
 
 // ----------------------------------------------------
-// API ROUTES
+// CORE SECURITY MIDDLEWARE
 // ----------------------------------------------------
+app.use(
+  helmet({
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        scriptSrc: ["'self'", "'unsafe-inline'"],
+        styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
+        fontSrc: ["'self'", 'https://fonts.gstatic.com'],
+        imgSrc: ["'self'", 'data:', 'https://images.unsplash.com', 'blob:'],
+        connectSrc: ["'self'", env.CORS_ORIGIN],
+      },
+    },
+    crossOriginEmbedderPolicy: false,
+  })
+);
 
-// 1. Health check
-app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', service: 'Riders Path API', time: new Date().toISOString() });
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      // Allow requests with no origin (e.g. mobile apps, curl, supertest)
+      if (!origin) return callback(null, true);
+      const allowedOrigins = [
+        env.CORS_ORIGIN,
+        'http://localhost:3000',
+        'http://localhost:5173',
+        'http://127.0.0.1:3000',
+        'http://127.0.0.1:5173',
+      ];
+      if (allowedOrigins.includes(origin)) {
+        return callback(null, true);
+      }
+      callback(new Error('CORS origin unauthorized'));
+    },
+    credentials: true,
+  })
+);
+
+app.use(cookieParser(env.SESSION_SECRET));
+
+// Standard 100kb body limit to prevent memory exhaustion DoS attacks
+app.use(express.json({ limit: '100kb' }));
+app.use(express.urlencoded({ extended: true, limit: '100kb' }));
+
+// Apply CSRF origin verification on state-changing requests
+app.use(verifyCsrfOrigin);
+
+// Global baseline rate limiting
+app.use('/api', globalLimiter);
+
+// ----------------------------------------------------
+// BACKGROUND CLEANUP: AUTO-EXPIRE UNCONFIRMED PENDING BOOKINGS
+// ----------------------------------------------------
+setInterval(() => {
+  try {
+    const expiredCutoff = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+    sqlite
+      .prepare(`
+        UPDATE bookings
+        SET booking_status = 'CANCELLED', cancellation_reason = 'Auto-expired: 30-minute verification window lapsed', updated_at = ?
+        WHERE booking_status = 'PENDING_VERIFICATION' AND created_at < ?
+      `)
+      .run(new Date().toISOString(), expiredCutoff);
+  } catch (err) {
+    console.error('Scheduled booking expiration error:', err);
+  }
+}, 5 * 60 * 1000);
+
+// ----------------------------------------------------
+// PUBLIC CONFIG & HEALTH ROUTES
+// ----------------------------------------------------
+app.get('/api/health', (_req: Request, res: Response) => {
+  res.json({ status: 'ok', service: 'Riders Path Secure API', time: new Date().toISOString() });
 });
 
-// 2. Platform Config
-app.get('/api/config', (req, res) => {
-  const config = db.getConfig();
-  // Never expose password hash
-  const { passwordHash, ...publicConfig } = config;
-  res.json(publicConfig);
-});
-
-app.put('/api/config', requireAdmin, (req, res) => {
-  const updates = req.body;
-  const updated = db.updateConfig(updates);
-  db.logAdminAction({
-    adminId: 'admin',
-    action: 'UPDATE_PLATFORM_CONFIG',
-    targetType: 'pricing',
-    targetId: 'config',
-    metadata: updates
+// Explicit allowlist public config (never leaks secrets or internal hashes)
+app.get('/api/config', (_req: Request, res: Response) => {
+  res.json({
+    appName: PLATFORM_CONFIG.appName,
+    campusName: PLATFORM_CONFIG.campusName,
+    allowedEmailDomain: PLATFORM_CONFIG.allowedEmailDomain,
+    termsVersion: PLATFORM_CONFIG.termsVersion,
+    privacyVersion: PLATFORM_CONFIG.privacyVersion,
+    depositPolicy: PLATFORM_CONFIG.depositPolicy,
+    hubs: PLATFORM_CONFIG.hubs,
+    safetyRules: PLATFORM_CONFIG.safetyRules,
   });
-  const { passwordHash, ...safeConfig } = updated;
-  res.json(safeConfig);
 });
 
-// 3. Admin Authentication
-app.post('/api/admin/login', (req, res) => {
-  const { password } = req.body;
+app.put('/api/config', requireAdmin, (req: Request, res: Response) => {
+  const allowedKeys = ['termsVersion', 'privacyVersion', 'depositPolicy', 'safetyRules'];
+  const sanitizedUpdates: Record<string, any> = {};
+  for (const k of allowedKeys) {
+    if (req.body[k] !== undefined) {
+      sanitizedUpdates[k] = req.body[k];
+    }
+  }
+
+  const updated = db.updateConfig(sanitizedUpdates);
+  db.logAudit({
+    actorId: req.admin!.id,
+    actorRole: 'admin',
+    action: 'UPDATE_CONFIG',
+    targetType: 'config',
+    targetId: 'platform_config',
+    diff: sanitizedUpdates,
+    ipAddress: req.ip,
+    userAgent: req.headers['user-agent'],
+  });
+
+  res.json(updated);
+});
+
+// ----------------------------------------------------
+// AUTHENTICATION ROUTES (STUDENT OTP + DEV HELPER)
+// ----------------------------------------------------
+app.post('/api/auth/otp/request', otpLimiter, (req: Request, res: Response) => {
+  const parseResult = OtpRequestSchema.safeParse(req.body);
+  if (!parseResult.success) {
+    return res.status(400).json({
+      error: parseResult.error.errors[0]?.message || 'Invalid campus email address',
+    });
+  }
+
+  const { email } = parseResult.data;
+  // Deterministic 6-digit numeric OTP code
+  const code = env.NODE_ENV === 'test' || env.NODE_ENV === 'development' ? '123456' : `${Math.floor(100000 + Math.random() * 900000)}`;
+
+  db.storeOtp(email, code);
+
+  // Uniform response message whether or not account exists to prevent account enumeration
+  res.json({
+    success: true,
+    message: `A 6-digit verification code has been dispatched to ${email}.`,
+  });
+});
+
+app.post('/api/auth/otp/verify', authLimiter, (req: Request, res: Response) => {
+  const parseResult = OtpVerifySchema.safeParse(req.body);
+  if (!parseResult.success) {
+    return res.status(400).json({ error: parseResult.error.errors[0]?.message || 'Invalid OTP payload' });
+  }
+
+  const { email, code } = parseResult.data;
+  const isValid = db.verifyOtp(email, code);
+
+  if (!isValid) {
+    return res.status(400).json({
+      error: 'Invalid or expired verification code. Please request a new OTP.',
+      code: 'INVALID_OTP',
+    });
+  }
+
+  let user = db.getUserByEmail(email);
+  const requiresProfileCompletion = !user || !user.full_name;
+
+  if (!user) {
+    user = db.createUser({
+      fullName: '',
+      email,
+      phone: '',
+      icfaiEnrollment: '',
+      academicYear: '1st Year',
+      course: '',
+      role: 'student',
+      verificationStatus: 'unverified',
+    });
+  }
+
+  // Issue random 256-bit crypto session token stored hashed in SQLite
+  const rawToken = crypto.randomBytes(32).toString('hex');
+  db.createSession(rawToken, user.id, user.role, 24 * 7, req.ip, req.headers['user-agent']);
+
+  // Set httpOnly session cookie
+  res.cookie(STUDENT_SESSION_COOKIE, rawToken, {
+    httpOnly: true,
+    secure: env.NODE_ENV === 'production',
+    sameSite: 'lax',
+    maxAge: 7 * 24 * 60 * 60 * 1000,
+  });
+
+  res.json({
+    requiresProfileCompletion,
+    user: user.full_name
+      ? {
+          id: user.id,
+          name: user.full_name,
+          email: user.email,
+          phone: user.phone,
+          enrollmentNumber: user.icfai_enrollment,
+          course: user.course,
+          year: user.academic_year,
+          isVerified: user.verification_status === 'verified',
+          createdAt: user.created_at,
+        }
+      : null,
+  });
+});
+
+// Development-only login helper (explicitly disabled in production)
+app.post('/api/auth/dev-login', authLimiter, (req: Request, res: Response) => {
+  if (env.NODE_ENV === 'production') {
+    return res.status(404).json({ error: 'Endpoint unavailable in production environment' });
+  }
+
+  const { enrollment, email, fullName } = req.body;
+  const lookup = enrollment ? db.getUserByEnrollment(enrollment) : email ? db.getUserByEmail(email) : null;
+
+  let user = lookup;
+  if (!user) {
+    user = db.createUser({
+      fullName: fullName || 'Test ICFAI Student',
+      email: email || `${(enrollment || '21bsph0101').toLowerCase()}@icfaiuniversity.in`,
+      phone: '9848022338',
+      icfaiEnrollment: enrollment || '21BSPH0101',
+      academicYear: '3rd Year',
+      course: 'B.Tech CSE',
+      role: 'student',
+      verificationStatus: 'verified',
+    });
+  }
+
+  const rawToken = crypto.randomBytes(32).toString('hex');
+  db.createSession(rawToken, user.id, user.role, 24 * 7, req.ip, req.headers['user-agent']);
+
+  res.cookie(STUDENT_SESSION_COOKIE, rawToken, {
+    httpOnly: true,
+    secure: false,
+    sameSite: 'lax',
+    maxAge: 7 * 24 * 60 * 60 * 1000,
+  });
+
+  res.json({
+    success: true,
+    token: rawToken, // Provided for direct programmatic testing
+    user: {
+      id: user.id,
+      name: user.full_name,
+      email: user.email,
+      phone: user.phone,
+      enrollmentNumber: user.icfai_enrollment,
+      course: user.course,
+      year: user.academic_year,
+      isVerified: user.verification_status === 'verified',
+      createdAt: user.created_at,
+    },
+  });
+});
+
+app.get('/api/auth/me', requireUser, (req: Request, res: Response) => {
+  const user = req.user!;
+  res.json({
+    id: user.id,
+    name: user.fullName,
+    email: user.email,
+    phone: user.phone,
+    enrollmentNumber: user.icfaiEnrollment,
+    course: user.course,
+    year: user.academicYear,
+    isVerified: user.verificationStatus === 'verified',
+  });
+});
+
+app.put('/api/auth/profile', requireUser, (req: Request, res: Response) => {
+  const parseResult = ProfileCompletionSchema.safeParse(req.body);
+  if (!parseResult.success) {
+    return res.status(400).json({
+      error: 'Validation failed',
+      details: parseResult.error.flatten().fieldErrors,
+    });
+  }
+
+  const data = parseResult.data;
+  const updated = db.updateUser(req.user!.id, {
+    fullName: data.name,
+    phone: data.phone,
+    course: data.course,
+    academicYear: data.year,
+    icfaiEnrollment: data.enrollmentNumber,
+    verificationStatus: 'verified',
+  });
+
+  db.logAudit({
+    actorId: req.user!.id,
+    actorRole: 'student',
+    action: 'COMPLETE_PROFILE',
+    targetType: 'user',
+    targetId: req.user!.id,
+    diff: { name: data.name, course: data.course, year: data.year },
+    ipAddress: req.ip,
+    userAgent: req.headers['user-agent'],
+  });
+
+  res.json({
+    id: updated.id,
+    name: updated.full_name,
+    email: updated.email,
+    phone: updated.phone,
+    enrollmentNumber: updated.icfai_enrollment,
+    course: updated.course,
+    year: updated.academic_year,
+    isVerified: updated.verification_status === 'verified',
+  });
+});
+
+app.post('/api/auth/logout', (req: Request, res: Response) => {
+  let token = req.cookies?.[STUDENT_SESSION_COOKIE];
+  if (!token && req.headers.authorization?.startsWith('Bearer ')) {
+    token = req.headers.authorization.split(' ')[1];
+  }
+  if (token) {
+    db.deleteSession(token);
+  }
+  res.clearCookie(STUDENT_SESSION_COOKIE);
+  res.json({ success: true, message: 'Logged out successfully' });
+});
+
+// ----------------------------------------------------
+// AUTHENTICATION ROUTES (ADMINISTRATION)
+// ----------------------------------------------------
+app.post('/api/admin/login', authLimiter, (req: Request, res: Response) => {
+  const { password, username } = req.body;
   if (!password) {
     return res.status(400).json({ error: 'Password is required' });
   }
 
   const isValid = db.verifyAdminPassword(password);
-  if (!isValid) {
-    return res.status(401).json({ error: 'Invalid administrator credentials' });
+  if (!isValid || (username && username !== env.ADMIN_USERNAME)) {
+    return res.status(401).json({ error: 'Invalid administrative credentials' });
   }
 
-  const sessionToken = 'adm_' + crypto.randomBytes(32).toString('hex');
-  adminSessions.add(sessionToken);
+  const rawToken = crypto.randomBytes(32).toString('hex');
+  db.createSession(rawToken, 'usr_system_admin', 'admin', 24, req.ip, req.headers['user-agent']);
 
-  db.logAdminAction({
-    adminId: 'admin',
+  res.cookie(ADMIN_SESSION_COOKIE, rawToken, {
+    httpOnly: true,
+    secure: env.NODE_ENV === 'production',
+    sameSite: 'strict',
+    maxAge: 24 * 60 * 60 * 1000,
+  });
+
+  db.logAudit({
+    actorId: 'admin',
+    actorRole: 'admin',
     action: 'ADMIN_LOGIN_SUCCESS',
     targetType: 'auth',
     targetId: 'admin',
-    metadata: { ip: req.ip }
+    ipAddress: req.ip,
+    userAgent: req.headers['user-agent'],
   });
 
-  res.json({
-    success: true,
-    token: sessionToken,
-    message: 'Admin session authenticated successfully'
-  });
+  res.json({ success: true, token: rawToken, message: 'Admin authenticated successfully' });
 });
 
-app.post('/api/admin/logout', requireAdmin, (req, res) => {
-  const authHeader = req.headers.authorization;
-  if (authHeader && authHeader.startsWith('Bearer ')) {
-    const token = authHeader.split(' ')[1];
-    adminSessions.delete(token);
+app.post('/api/admin/logout', requireAdmin, (req: Request, res: Response) => {
+  if (req.rawSessionToken) {
+    db.deleteSession(req.rawSessionToken);
   }
-  res.json({ success: true, message: 'Logged out of admin session' });
+  res.clearCookie(ADMIN_SESSION_COOKIE);
+  res.json({ success: true, message: 'Admin session closed' });
 });
 
-app.post('/api/admin/change-password', requireAdmin, (req, res) => {
-  const { oldPassword, newPassword } = req.body;
-  if (!oldPassword || !newPassword) {
-    return res.status(400).json({ error: 'Both old and new passwords are required' });
-  }
-  if (newPassword.length < 6) {
-    return res.status(400).json({ error: 'New password must be at least 6 characters long' });
-  }
+// ----------------------------------------------------
+// BIKES CATALOG & AVAILABILITY ROUTES
+// ----------------------------------------------------
+// Public endpoint maps strictly through PublicBikeDtoSchema (strips all owner PII)
+app.get('/api/bikes', (req: Request, res: Response) => {
+  const { q, bikeType, fuelType, hubId, maxHourlyRate, sortBy } = req.query;
 
-  const success = db.changeAdminPassword(oldPassword, newPassword);
-  if (!success) {
-    return res.status(400).json({ error: 'Current password does not match' });
-  }
-
-  res.json({ success: true, message: 'Admin password updated securely' });
-});
-
-// Helper for ICFAI Enrollment Number Validation
-function validateIcfaiEnrollment(enrollment: string): { valid: boolean; normalized: string; error?: string } {
-  if (!enrollment || typeof enrollment !== 'string') {
-    return { valid: false, normalized: '', error: 'ICFAI enrollment number is required.' };
-  }
-  const clean = enrollment.trim().toUpperCase();
-  if (clean.length < 10) {
-    return { valid: false, normalized: clean, error: 'Enrollment number must contain at least 10 characters (Example: 26FMUCHH01XXXX).' };
-  }
-  if (/\s/.test(clean)) {
-    return { valid: false, normalized: clean, error: 'Enrollment number cannot contain spaces.' };
-  }
-  if (!/^[A-Z0-9]+$/.test(clean)) {
-    return { valid: false, normalized: clean, error: 'Enrollment number can only contain letters and numbers (no special characters).' };
-  }
-  return { valid: true, normalized: clean };
-}
-
-// 4. Student User Authentication & Registry
-app.post('/api/users/login', (req, res) => {
-  const { fullName, email, phone, icfaiEnrollmentNumber, academicYear, course } = req.body;
-  if (!fullName || !icfaiEnrollmentNumber) {
-    return res.status(400).json({ error: 'Full name and ICFAI enrollment number are required' });
-  }
-
-  const enrollmentCheck = validateIcfaiEnrollment(icfaiEnrollmentNumber);
-  if (!enrollmentCheck.valid) {
-    return res.status(400).json({ error: enrollmentCheck.error });
-  }
-
-  const cleanEnrollment = enrollmentCheck.normalized;
-
-  let user = db.getUserByEnrollment(cleanEnrollment);
-  if (!user) {
-    user = db.createUser({
-      fullName: fullName.trim(),
-      email: email || `${cleanEnrollment.toLowerCase()}@student.icfaiuniversity.in`,
-      phone: phone || '+91 98000 00000',
-      icfaiEnrollmentNumber: cleanEnrollment,
-      academicYear: academicYear || 'Year 1',
-      course: course || 'B.Tech (CSE)',
-      ageConfirmation: true,
-      drivingLicenseConfirmation: true,
-      verificationStatus: 'verified',
-      role: 'student'
-    });
-  } else if (academicYear || course) {
-    user = db.updateUser(user.id, {
-      ...(academicYear ? { academicYear } : {}),
-      ...(course ? { course } : {})
-    }) || user;
-  }
-
-  const userToken = 'usr_' + crypto.randomBytes(24).toString('hex');
-  userSessions.set(userToken, user.id);
-
-  res.json({
-    success: true,
-    token: userToken,
-    user
-  });
-});
-
-app.get('/api/users', requireAdmin, (req, res) => {
-  res.json(db.getUsers());
-});
-
-app.put('/api/users/:id/status', requireAdmin, (req, res) => {
-  const { id } = req.params;
-  const { verificationStatus } = req.body;
-  const updated = db.updateUser(id, { verificationStatus });
-  if (!updated) {
-    return res.status(404).json({ error: 'User not found' });
-  }
-  db.logAdminAction({
-    adminId: 'admin',
-    action: 'UPDATE_USER_STATUS',
-    targetType: 'user',
-    targetId: id,
-    metadata: { newStatus: verificationStatus }
-  });
-  res.json(updated);
-});
-
-// 5. Bike Catalog & Management
-app.get('/api/bikes', (req, res) => {
-  const { status, brand, bikeType, fuelType, transmission, search } = req.query;
   const bikes = db.getBikes({
-    status: status as string,
-    brand: brand as string,
-    bikeType: bikeType as string,
-    fuelType: fuelType as string,
-    transmission: transmission as string,
-    search: search as string,
+    search: typeof q === 'string' ? q : undefined,
+    bikeType: typeof bikeType === 'string' ? bikeType : undefined,
+    fuelType: typeof fuelType === 'string' ? fuelType : undefined,
+    hubId: typeof hubId === 'string' ? hubId : undefined,
+    maxPrice: maxHourlyRate ? Number(maxHourlyRate) : undefined,
     onlyActive: true,
-    onlyApproved: true
+    onlyApproved: true,
   });
-  res.json(bikes);
+
+  // Map to Public Bike DTO explicitly stripping owner phone, owner enrollment, and owner course
+  const publicList = bikes.map((b) => ({
+    id: b.id,
+    brand: b.brand,
+    model: b.model,
+    year: b.year,
+    bikeType: b.bikeType,
+    fuelType: b.fuelType,
+    transmission: b.transmission,
+    hourlyRateInr: b.hourlyRateInr,
+    dailyRateInr: b.dailyRateInr,
+    hubId: b.hubId,
+    hubName: b.hubName,
+    images: b.images,
+    features: b.features,
+    isInstantBooking: b.isInstantBooking,
+    rating: b.rating,
+    totalTrips: b.totalTrips,
+    conditionNotes: b.conditionNotes,
+    registrationMasked: b.displayRegistrationToPublic ? b.registrationNumber : b.registrationMasked,
+  }));
+
+  // Sorting
+  if (sortBy === 'price_asc') {
+    publicList.sort((a, b) => a.hourlyRateInr - b.hourlyRateInr);
+  } else if (sortBy === 'price_desc') {
+    publicList.sort((a, b) => b.hourlyRateInr - a.hourlyRateInr);
+  } else if (sortBy === 'rating') {
+    publicList.sort((a, b) => b.rating - a.rating);
+  }
+
+  res.json(publicList);
 });
 
-app.get('/api/bikes/all', requireAdmin, (req, res) => {
-  res.json(db.getAllBikesAdmin());
+app.get('/api/bikes/all', requireAdmin, (_req: Request, res: Response) => {
+  const allBikes = db.getBikes({});
+  res.json(allBikes);
 });
 
-app.get('/api/bikes/:id', (req, res) => {
+app.get('/api/bikes/:id', (req: Request, res: Response) => {
   const bike = db.getBikeById(req.params.id);
   if (!bike) {
-    return res.status(404).json({ error: 'Bike not found' });
+    return res.status(404).json({ error: 'Vehicle listing not found' });
   }
-  res.json(bike);
+
+  // Public sanitization
+  const publicDto = {
+    id: bike.id,
+    brand: bike.brand,
+    model: bike.model,
+    year: bike.year,
+    bikeType: bike.bikeType,
+    fuelType: bike.fuelType,
+    transmission: bike.transmission,
+    hourlyRateInr: bike.hourlyRateInr,
+    dailyRateInr: bike.dailyRateInr,
+    hubId: bike.hubId,
+    hubName: bike.hubName,
+    images: bike.images,
+    features: bike.features,
+    isInstantBooking: bike.isInstantBooking,
+    rating: bike.rating,
+    totalTrips: bike.totalTrips,
+    conditionNotes: bike.conditionNotes,
+    registrationMasked: bike.displayRegistrationToPublic ? bike.registrationNumber : bike.registrationMasked,
+  };
+
+  res.json(publicDto);
 });
 
-// Check specific bike schedule conflict for requested dates
-app.get('/api/bikes/:id/availability', (req, res) => {
+// Live Availability Check (returns start/end ranges only; NEVER personal or booking models)
+app.get('/api/bikes/:id/availability', (req: Request, res: Response) => {
   const { id } = req.params;
-  const { pickupDate, returnDate } = req.query;
+  const { startTime, endTime } = req.query;
 
   const bike = db.getBikeById(id);
   if (!bike) {
     return res.status(404).json({ error: 'Bike not found' });
   }
 
-  if (bike.availabilityStatus !== 'AVAILABLE') {
+  if (bike.availabilityStatus !== 'AVAILABLE' || bike.approvalStatus !== 'APPROVED') {
     return res.json({
       available: false,
       reason: `Vehicle is currently marked as ${bike.availabilityStatus}`,
-      conflicts: []
+      blockedRanges: [],
     });
   }
 
-  if (!pickupDate || !returnDate) {
-    return res.json({ available: true, conflicts: [] });
+  if (!startTime || !endTime) {
+    return res.json({ available: true, blockedRanges: [] });
   }
 
-  const reqPickup = new Date(pickupDate as string).getTime();
-  const reqReturn = new Date(returnDate as string).getTime();
-
-  if (isNaN(reqPickup) || isNaN(reqReturn) || reqPickup >= reqReturn) {
-    return res.status(400).json({ error: 'Invalid pickup and return time range' });
-  }
-
-  // Active bookings that occupy the bike
-  const allBookings = db.getBookings();
-  const conflicting = allBookings.filter((b) => {
-    if (b.bikeId !== id) return false;
-    if (b.bookingStatus === 'cancelled' || b.bookingStatus === 'rejected' || b.bookingStatus === 'completed') return false;
-
-    const bPickup = new Date(b.pickupDate).getTime();
-    const bReturn = new Date(b.returnDate).getTime();
-
-    // Check overlap: max(pickup1, pickup2) < min(return1, return2)
-    return Math.max(reqPickup, bPickup) < Math.min(reqReturn, bReturn);
-  });
-
-  if (conflicting.length > 0) {
-    const conflict = conflicting[0];
-    const fromStr = new Date(conflict.pickupDate).toLocaleString('en-IN', { dateStyle: 'short', timeStyle: 'short' });
-    const toStr = new Date(conflict.returnDate).toLocaleString('en-IN', { dateStyle: 'short', timeStyle: 'short' });
-    return res.json({
-      available: false,
-      reason: `This bike already has a reserved booking from ${fromStr} to ${toStr}.`,
-      conflicts: conflicting
-    });
-  }
-
-  res.json({ available: true, conflicts: [] });
+  const result = db.checkBikeAvailability(id, startTime as string, endTime as string);
+  res.json(result);
 });
 
-app.post('/api/bikes', requireAdmin, (req, res) => {
-  const bikeData = req.body;
-  if (!bikeData.brand || !bikeData.model) {
-    return res.status(400).json({ error: 'Brand and Model are required' });
-  }
-
-  const rawDayPrice = Number(bikeData.pricePerDay);
-  const rawHourPrice = Number(bikeData.pricePerHour);
-
-  let finalDayPrice = rawDayPrice > 0 ? rawDayPrice : (rawHourPrice > 0 ? rawHourPrice * 24 : 599);
-  let finalHourPrice = rawHourPrice > 0 ? rawHourPrice : (finalDayPrice > 0 ? Math.round((finalDayPrice / 24) * 100) / 100 : 59);
-
-  const created = db.createBike({
-    ...bikeData,
-    pricePerDay: finalDayPrice,
-    pricePerHour: finalHourPrice,
-    securityDeposit: Number(bikeData.securityDeposit) || 1000,
-    approvedByAdmin: true,
-    active: bikeData.active !== undefined ? bikeData.active : true
+// ----------------------------------------------------
+// SERVER-COMPUTED PRICING ENDPOINT
+// ----------------------------------------------------
+app.post('/api/pricing/calculate', (req: Request, res: Response) => {
+  const PricingInputSchema = z.object({
+    bikeId: z.string(),
+    startTime: z.string().datetime(),
+    endTime: z.string().datetime(),
+    depositType: z.enum(['laptop', 'cash_hub']),
   });
 
-  db.logAdminAction({
-    adminId: 'admin',
-    action: 'CREATE_BIKE_LISTING',
-    targetType: 'bike',
-    targetId: created.id,
-    metadata: { brand: created.brand, model: created.model }
-  });
-
-  res.status(201).json(created);
-});
-
-app.put('/api/bikes/:id', requireAdmin, (req, res) => {
-  const { id } = req.params;
-  const updates = { ...req.body };
-
-  if (updates.pricePerDay !== undefined || updates.pricePerHour !== undefined) {
-    const dayP = Number(updates.pricePerDay);
-    const hrP = Number(updates.pricePerHour);
-    if (dayP > 0 && (!hrP || hrP <= 0)) {
-      updates.pricePerHour = Math.round((dayP / 24) * 100) / 100;
-    } else if (hrP > 0 && (!dayP || dayP <= 0)) {
-      updates.pricePerDay = Math.round(hrP * 24);
-    }
+  const parseResult = PricingInputSchema.safeParse(req.body);
+  if (!parseResult.success) {
+    return res.status(400).json({ error: 'Invalid pricing parameters', details: parseResult.error.flatten() });
   }
 
-  const updated = db.updateBike(id, updates);
-  if (!updated) {
-    return res.status(404).json({ error: 'Bike not found' });
+  const { bikeId, startTime, endTime, depositType } = parseResult.data;
+  const bike = db.getBikeById(bikeId);
+  if (!bike) {
+    return res.status(404).json({ error: 'Bike not found for pricing calculation' });
   }
 
-  db.logAdminAction({
-    adminId: 'admin',
-    action: 'UPDATE_BIKE_LISTING',
-    targetType: 'bike',
-    targetId: id,
-    metadata: updates
-  });
-
-  res.json(updated);
-});
-
-app.delete('/api/bikes/:id', requireAdmin, (req, res) => {
-  const { id } = req.params;
-  const success = db.deleteBike(id);
-  if (!success) {
-    return res.status(404).json({ error: 'Bike not found' });
+  const startMs = new Date(startTime).getTime();
+  const endMs = new Date(endTime).getTime();
+  if (endMs <= startMs) {
+    return res.status(400).json({ error: 'End time must be after pickup time' });
   }
 
-  db.logAdminAction({
-    adminId: 'admin',
-    action: 'DELETE_BIKE_LISTING',
-    targetType: 'bike',
-    targetId: id
-  });
+  const durationHours = Math.max(1, Math.ceil((endMs - startMs) / (1000 * 60 * 60)));
 
-  res.json({ success: true, message: 'Bike listing deleted' });
-});
-
-// 6. Owner Onboarding (Students listing their bikes)
-app.post('/api/owner/onboard', (req, res) => {
-  const {
-    fullName,
-    ownerName,
-    phone,
-    ownerPhone,
-    email,
-    ownerEmail,
-    icfaiEnrollmentNumber,
-    ownerEnrollment,
-    brand,
-    model,
-    year,
-    registrationNumber,
-    bikeType,
-    fuelType,
-    transmission,
-    description,
-    images,
-    pricePerDay,
-    pricePerHour,
-    securityDeposit,
-    specs,
-    pickupHub,
-    payoutUpiId,
-    ownershipPledge,
-    academicYear,
-    course
-  } = req.body;
-
-  // Resolve normalized owner details from either naming convention
-  const resolvedFullName = (fullName || ownerName || '').trim();
-  const rawEnrollment = (icfaiEnrollmentNumber || ownerEnrollment || '').trim();
-  const resolvedPhone = (phone || ownerPhone || '').trim() || '+91 90000 00000';
-  const resolvedBrand = (brand || '').trim();
-  const resolvedModel = (model || '').trim();
-  const resolvedReg = (registrationNumber || '').trim().toUpperCase();
-  const resolvedYear = academicYear || 'Year 2';
-  const resolvedCourse = course || 'B.Tech (CSE)';
-
-  if (!resolvedFullName) {
-    return res.status(400).json({ error: 'Full name of bike owner is required.' });
-  }
-
-  if (!rawEnrollment) {
-    return res.status(400).json({ error: 'ICFAI enrollment number is required (Example: 26FMUCHH01XXXX).' });
-  }
-
-  const enrollmentCheck = validateIcfaiEnrollment(rawEnrollment);
-  if (!enrollmentCheck.valid) {
-    return res.status(400).json({ error: enrollmentCheck.error });
-  }
-  const cleanEnrollment = enrollmentCheck.normalized;
-
-  if (!resolvedBrand || !resolvedModel) {
-    return res.status(400).json({ error: 'Bike brand and model are required.' });
-  }
-
-  if (!resolvedReg) {
-    return res.status(400).json({ error: 'Vehicle registration number is required (e.g. TS 08 FG 4821).' });
-  }
-
-  // Calculate synchronized pricing
-  const rawDay = Number(pricePerDay);
-  const rawHour = Number(pricePerHour);
-  const calculatedDay = rawDay > 0 ? rawDay : (rawHour > 0 ? rawHour * 24 : 599);
-  const calculatedHour = rawHour > 0 ? rawHour : (calculatedDay > 0 ? Math.round((calculatedDay / 24) * 100) / 100 : 59);
-
-  // Create or get student user
-  let user = db.getUserByEnrollment(cleanEnrollment);
-  if (!user) {
-    user = db.createUser({
-      fullName: resolvedFullName,
-      phone: resolvedPhone,
-      email: email || ownerEmail || `${cleanEnrollment.toLowerCase()}@student.icfaiuniversity.in`,
-      icfaiEnrollmentNumber: cleanEnrollment,
-      academicYear: resolvedYear,
-      course: resolvedCourse,
-      ageConfirmation: true,
-      drivingLicenseConfirmation: true,
-      verificationStatus: 'verified',
-      role: 'owner'
-    });
+  // Pure deterministic pricing rules
+  let rentalChargeInr = 0;
+  if (durationHours >= 24) {
+    const fullDays = Math.floor(durationHours / 24);
+    const remHours = durationHours % 24;
+    rentalChargeInr = fullDays * bike.dailyRateInr + Math.min(remHours * bike.hourlyRateInr, bike.dailyRateInr);
   } else {
-    user = db.updateUser(user.id, {
-      role: 'owner',
-      ...(academicYear ? { academicYear } : {}),
-      ...(course ? { course } : {})
-    }) || user;
+    rentalChargeInr = Math.min(durationHours * bike.hourlyRateInr, bike.dailyRateInr);
   }
 
-  // Create Owner Record
-  const owner = db.createOwner({
-    userId: user.id,
-    fullName: resolvedFullName,
-    phone: user.phone,
-    email: user.email,
-    icfaiEnrollmentNumber: cleanEnrollment,
-    academicYear: resolvedYear,
-    course: resolvedCourse,
-    payoutUpiId: payoutUpiId || `${user.phone.replace(/[^0-9]/g, '') || 'student'}@upi`,
-    totalEarnings: 0,
-    activeListingsCount: 1,
-    ownershipVerificationStatus: 'pending'
-  });
+  const platformFeeInr = Math.round(
+    (rentalChargeInr * PLATFORM_CONFIG.depositPolicy.platformFeePercent) / 100
+  );
+  const depositInr = depositType === 'cash_hub' ? PLATFORM_CONFIG.depositPolicy.standardAmountInr : 0;
+  const totalPayableAtHandoverInr = rentalChargeInr + platformFeeInr + depositInr;
 
-  // Create unapproved Bike listing for admin inspection
-  const newBike = db.createBike({
-    ownerId: user.id,
-    ownerName: resolvedFullName,
-    ownerPhone: resolvedPhone,
-    ownerEnrollment: cleanEnrollment,
-    ownerAcademicYear: resolvedYear,
-    ownerCourse: resolvedCourse,
-    brand: resolvedBrand,
-    model: resolvedModel,
-    year: Number(year) || 2023,
-    registrationNumber: resolvedReg,
-    displayRegistrationToPublic: false,
-    bikeType: bikeType || 'Street',
-    fuelType: fuelType || 'Petrol',
-    transmission: transmission || 'Manual',
-    description: description || `Student listed ${resolvedBrand} ${resolvedModel} on ICFAI Hyderabad campus.`,
-    images: Array.isArray(images) && images.length > 0 ? images : [
-      'https://images.unsplash.com/photo-1558981806-ec527fa84c39?auto=format&fit=crop&w=1200&q=80'
-    ],
-    pricePerDay: calculatedDay,
-    pricePerHour: calculatedHour,
-    securityDeposit: Number(securityDeposit) || 1000,
-    availabilityStatus: 'AVAILABLE',
-    active: true,
-    approvalStatus: 'PENDING_APPROVAL',
-    specs: specs || {
-      cc: 150,
-      mileage: '45 km/l',
-      topSpeed: '110 km/h',
-      fuelCapacity: '12 L',
-      weight: '140 kg',
-      abs: true,
-      helmetsIncluded: 1
-    },
-    pickupHub: pickupHub || 'ICFAI Main Gate (Shankerpally Rd)',
-    approvedByAdmin: false // Requires admin review
-  });
+  const breakdown = {
+    durationHours,
+    rentalChargeInr,
+    platformFeeInr,
+    depositInr,
+    depositType,
+    totalPayableAtHandoverInr,
+    isServerCalculated: true,
+  };
 
-  db.logAdminAction({
-    adminId: user.id,
-    action: 'STUDENT_SUBMITTED_BIKE_ONBOARDING',
-    targetType: 'owner',
-    targetId: newBike.id,
-    metadata: { ownerName: resolvedFullName, enrollment: cleanEnrollment, bike: `${resolvedBrand} ${resolvedModel}` }
-  });
-
-  res.status(201).json({
-    success: true,
-    message: 'Bike submitted successfully. Your bike is now pending admin approval.',
-    bike: newBike,
-    owner
-  });
+  res.json(breakdown);
 });
 
-app.get('/api/owner/submissions', requireAdmin, (req, res) => {
-  const unapprovedBikes = db.getAllBikesAdmin().filter((b) => !b.approvedByAdmin);
-  res.json(unapprovedBikes);
-});
-
-app.post('/api/owner/approve/:id', requireAdmin, (req, res) => {
-  const { id } = req.params;
-  const updated = db.updateBike(id, { approvedByAdmin: true });
-  if (!updated) {
-    return res.status(404).json({ error: 'Bike not found' });
+// ----------------------------------------------------
+// BOOKINGS (STUDENT & ADMIN PROTECTED)
+// ----------------------------------------------------
+app.post('/api/bookings', requireUser, bookingLimiter, (req: Request, res: Response) => {
+  const parseResult = BookingCreateSchema.safeParse(req.body);
+  if (!parseResult.success) {
+    return res.status(400).json({
+      error: 'Validation failed for booking submission',
+      details: parseResult.error.flatten().fieldErrors,
+    });
   }
 
-  db.logAdminAction({
-    adminId: 'admin',
-    action: 'APPROVE_OWNER_BIKE_LISTING',
-    targetType: 'bike',
-    targetId: id,
-    metadata: { brand: updated.brand, model: updated.model }
-  });
+  const data = parseResult.data;
+  const user = req.user!;
 
-  res.json({ success: true, message: 'Bike listing approved and published', bike: updated });
-});
+  // 1. Cap concurrent pending bookings per user (max 3)
+  const userBookings = db.getBookings(user.id);
+  const activeCount = userBookings.filter(
+    (b) => b.status === 'PENDING_VERIFICATION' || b.status === 'CONFIRMED' || b.status === 'ACTIVE'
+  ).length;
 
-app.post('/api/owner/reject/:id', requireAdmin, (req, res) => {
-  const { id } = req.params;
-  const { reason } = req.body;
-  const bike = db.getBikeById(id);
-  if (!bike) {
-    return res.status(404).json({ error: 'Bike not found' });
-  }
-  const updated = db.updateBike(id, {
-    approvedByAdmin: false,
-    approvalStatus: 'REJECTED',
-    approvalNotes: reason || 'Listing rejected by administrator.',
-    availabilityStatus: 'UNAVAILABLE'
-  });
-
-  db.logAdminAction({
-    adminId: 'admin',
-    action: 'REJECT_OWNER_BIKE_LISTING',
-    targetType: 'bike',
-    targetId: id,
-    metadata: { reason }
-  });
-
-  res.json({ success: true, message: 'Bike listing rejected', bike: updated });
-});
-
-app.post('/api/owner/request-changes/:id', requireAdmin, (req, res) => {
-  const { id } = req.params;
-  const { notes } = req.body;
-  const bike = db.getBikeById(id);
-  if (!bike) {
-    return res.status(404).json({ error: 'Bike not found' });
+  if (activeCount >= 3) {
+    return res.status(400).json({
+      error: 'Booking Limit: You have 3 active reservations. Please complete or cancel one before booking again.',
+    });
   }
 
-  const updated = db.updateBike(id, {
-    approvalStatus: 'CHANGES_REQUESTED',
-    approvalNotes: notes || 'Please update the requested details.',
-    approvedByAdmin: false
-  });
+  // 2. Validate Schedule against current time
+  const startMs = new Date(data.startTime).getTime();
+  const endMs = new Date(data.endTime).getTime();
+  const nowWithGrace = Date.now() - 5 * 60 * 1000;
 
-  db.logAdminAction({
-    adminId: 'admin',
-    action: 'REQUEST_CHANGES_OWNER_BIKE',
-    targetType: 'bike',
-    targetId: id,
-    metadata: { notes }
-  });
-
-  res.json({ success: true, message: 'Changes requested from bike owner', bike: updated });
-});
-
-// 7. Bookings & Digital Passes
-app.get('/api/bookings', (req, res) => {
-  const { renterId, enrollment } = req.query;
-  if (renterId) {
-    return res.json(db.getBookings(renterId as string));
+  if (startMs < nowWithGrace) {
+    return res.status(400).json({ error: 'Pickup date cannot be in the past' });
   }
-  if (enrollment) {
-    const all = db.getBookings();
-    const filtered = all.filter((b) => b.renterEnrollment.toUpperCase() === (enrollment as string).toUpperCase());
-    return res.json(filtered);
+  if (endMs <= startMs) {
+    return res.status(400).json({ error: 'Return date must be after pickup date' });
   }
-  // If not admin, restrict full booking list
-  const authHeader = req.headers.authorization;
-  if (authHeader && authHeader.startsWith('Bearer ')) {
-    const token = authHeader.split(' ')[1];
-    if (adminSessions.has(token)) {
-      return res.json(db.getBookings());
+
+  // 3. Server computes duration and pricing (client-supplied numbers are completely ignored)
+  const bike = db.getBikeById(data.bikeId);
+  if (!bike || bike.availabilityStatus !== 'AVAILABLE' || bike.approvalStatus !== 'APPROVED') {
+    return res.status(400).json({ error: 'Vehicle unavailable for reservation' });
+  }
+
+  const durationHours = Math.max(1, Math.ceil((endMs - startMs) / (1000 * 60 * 60)));
+  let rentalChargeInr = 0;
+  if (durationHours >= 24) {
+    const fullDays = Math.floor(durationHours / 24);
+    const remHours = durationHours % 24;
+    rentalChargeInr = fullDays * bike.dailyRateInr + Math.min(remHours * bike.hourlyRateInr, bike.dailyRateInr);
+  } else {
+    rentalChargeInr = Math.min(durationHours * bike.hourlyRateInr, bike.dailyRateInr);
+  }
+
+  const platformFeeInr = Math.round((rentalChargeInr * PLATFORM_CONFIG.depositPolicy.platformFeePercent) / 100);
+  const depositInr = data.depositType === 'cash_hub' ? PLATFORM_CONFIG.depositPolicy.standardAmountInr : 0;
+  const totalPayableInr = rentalChargeInr + platformFeeInr + depositInr;
+
+  const hub = PLATFORM_CONFIG.hubs.find((h) => h.id === data.pickupHubId) || {
+    id: data.pickupHubId,
+    name: bike.hubName,
+  };
+
+  try {
+    const createdBooking = db.createBookingAtomic({
+      bikeId: bike.id,
+      renterId: user.id,
+      renterName: user.fullName,
+      renterPhone: user.phone,
+      renterEmail: user.email,
+      renterEnrollment: user.icfaiEnrollment,
+      pickupHubId: data.pickupHubId,
+      pickupHubName: hub.name,
+      startTime: data.startTime,
+      endTime: data.endTime,
+      durationHours,
+      rentalChargeInr,
+      platformFeeInr,
+      depositInr,
+      depositType: data.depositType,
+      totalPayableInr,
+      drivingLicenseDocPath: data.drivingLicenceImage,
+      studentIdDocPath: data.studentIdCardImage,
+      agreedTermsVersion: data.agreedToTermsVersion,
+      idempotencyKey: data.idempotencyKey,
+    });
+
+    db.logAudit({
+      actorId: user.id,
+      actorRole: 'student',
+      action: 'CREATE_BOOKING',
+      targetType: 'booking',
+      targetId: createdBooking.id,
+      diff: { bikeId: bike.id, startTime: data.startTime, totalPayableInr },
+      ipAddress: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
+
+    res.status(201).json(createdBooking);
+  } catch (err: any) {
+    if (err.message && err.message.includes('CONCURRENT_CONFLICT')) {
+      return res.status(409).json({ error: 'This bike was just booked by another student for these dates.' });
     }
+    res.status(500).json({ error: 'Failed to create booking' });
   }
-  return res.json(db.getBookings());
 });
 
-app.get('/api/bookings/:id', (req, res) => {
+app.get('/api/bookings/my', requireUser, (req: Request, res: Response) => {
+  const bookings = db.getBookings(req.user!.id);
+  res.json(bookings);
+});
+
+// Single booking with ownership or admin enforcement
+app.get('/api/bookings/:id', (req: Request, res: Response) => {
   const booking = db.getBookingById(req.params.id);
   if (!booking) {
     return res.status(404).json({ error: 'Booking not found' });
   }
+
+  // Check student ownership or admin credentials
+  let isAllowed = false;
+  let token = req.cookies?.[STUDENT_SESSION_COOKIE] || req.cookies?.[ADMIN_SESSION_COOKIE];
+  if (!token && req.headers.authorization?.startsWith('Bearer ')) {
+    token = req.headers.authorization.split(' ')[1];
+  }
+
+  if (token) {
+    const session = db.getSession(token);
+    if (session) {
+      if (session.role === 'admin' || session.user_id === booking.userId) {
+        isAllowed = true;
+      }
+    }
+  }
+
+  if (!isAllowed) {
+    return res.status(403).json({ error: 'Access Denied: You do not own this reservation' });
+  }
+
   res.json(booking);
 });
 
-app.post('/api/bookings', async (req, res) => {
-  const {
-    bikeId,
-    renterName,
-    renterPhone,
-    renterEmail,
-    renterEnrollment,
-    renterAcademicYear,
-    renterCourse,
-    pickupLocationId,
-    pickupLocationName,
-    pickupDate,
-    returnDate,
-    durationHours,
-    durationDays,
-    aadharDoc,
-    dlDoc,
-    studentIdDoc,
-    laptopDepositAcknowledged,
-    termsAccepted,
-    termsVersion
-  } = req.body;
-
-  if (!termsAccepted) {
-    return res.status(400).json({
-      error: 'Mandatory Agreement Required: You must read and explicitly accept the Riders Path Terms & Conditions before submitting a booking.'
-    });
-  }
-
-  if (!bikeId || !renterName || !renterEnrollment || !pickupDate || !returnDate) {
-    return res.status(400).json({ error: 'Missing required booking fields (bikeId, name, enrollment, dates).' });
-  }
-
-  // 1. Validate ICFAI Enrollment
-  const enrollmentCheck = validateIcfaiEnrollment(renterEnrollment);
-  if (!enrollmentCheck.valid) {
-    return res.status(400).json({ error: enrollmentCheck.error });
-  }
-  const cleanEnrollment = enrollmentCheck.normalized;
-
-  // 2. Validate Schedule
-  const reqPickup = new Date(pickupDate).getTime();
-  const reqReturn = new Date(returnDate).getTime();
-  const now = Date.now() - 5 * 60 * 1000; // 5 min grace for clock drift
-
-  if (isNaN(reqPickup) || isNaN(reqReturn)) {
-    return res.status(400).json({ error: 'Invalid pickup or return date format.' });
-  }
-  if (reqPickup < now) {
-    return res.status(400).json({ error: 'Pickup date cannot be in the past.' });
-  }
-  if (reqPickup >= reqReturn) {
-    return res.status(400).json({ error: 'Return date and time must be after pickup date and time.' });
-  }
-
-  // 3. Verify Bike Existence & Status
-  const bike = db.getBikeById(bikeId);
-  if (!bike) {
-    return res.status(404).json({ error: 'Selected vehicle listing not found.' });
-  }
-  if (bike.availabilityStatus !== 'AVAILABLE') {
-    return res.status(400).json({ error: `This vehicle is currently marked as ${bike.availabilityStatus}.` });
-  }
-
-  // 4. Overlapping booking conflict prevention
-  const allBookings = db.getBookings();
-  const conflicting = allBookings.filter((b) => {
-    if (b.bikeId !== bikeId) return false;
-    if (b.bookingStatus === 'cancelled' || b.bookingStatus === 'rejected' || b.bookingStatus === 'completed') return false;
-
-    const bPickup = new Date(b.pickupDate).getTime();
-    const bReturn = new Date(b.returnDate).getTime();
-
-    return Math.max(reqPickup, bPickup) < Math.min(reqReturn, bReturn);
-  });
-
-  if (conflicting.length > 0) {
-    const conflict = conflicting[0];
-    const fromStr = new Date(conflict.pickupDate).toLocaleString('en-IN', { dateStyle: 'short', timeStyle: 'short' });
-    const toStr = new Date(conflict.returnDate).toLocaleString('en-IN', { dateStyle: 'short', timeStyle: 'short' });
-    return res.status(409).json({
-      error: `Schedule conflict: This bike is already booked between ${fromStr} and ${toStr}. Please choose alternative dates.`
-    });
-  }
-
-  // 5. Calculate Real Pricing
-  const totalHours = Math.max(1, Math.round((reqReturn - reqPickup) / (1000 * 60 * 60)));
-  const days = Math.max(1, Number(durationDays) || Math.ceil(totalHours / 24));
-  const rentalTotal = days * bike.pricePerDay;
-  const platformFee = Math.round(rentalTotal * 0.08);
-  const securityDeposit = bike.securityDeposit;
-
-  // 6. User record creation or resolution
-  let user = db.getUserByEnrollment(cleanEnrollment);
-  const resolvedYear = renterAcademicYear || 'Year 1';
-  const resolvedCourse = renterCourse || 'B.Tech (CSE)';
-
-  if (!user) {
-    user = db.createUser({
-      fullName: renterName.trim(),
-      phone: renterPhone || '+91 90000 00000',
-      email: renterEmail || `${cleanEnrollment.toLowerCase()}@student.icfaiuniversity.in`,
-      icfaiEnrollmentNumber: cleanEnrollment,
-      academicYear: resolvedYear,
-      course: resolvedCourse,
-      ageConfirmation: true,
-      drivingLicenseConfirmation: true,
-      verificationStatus: 'verified',
-      role: 'student'
-    });
-  } else if (renterAcademicYear || renterCourse) {
-    user = db.updateUser(user.id, {
-      ...(renterAcademicYear ? { academicYear: renterAcademicYear } : {}),
-      ...(renterCourse ? { course: renterCourse } : {})
-    }) || user;
-  }
-
-  const generatedPassId = Math.floor(1000 + Math.random() * 9000);
-  const chosenHub = pickupLocationName || bike.pickupHub || 'ICFAI Main Gate (Shankerpally Rd)';
-
-  // 7. Create booking in PENDING_VERIFICATION state
-  const config = db.getConfig();
-  const newBooking = db.createBooking({
-    bikeId: bike.id,
-    bikeBrand: bike.brand,
-    bikeModel: bike.model,
-    bikeImage: bike.images[0] || '',
-    bikeRegistration: bike.registrationNumber,
-    pickupHub: chosenHub,
-    pickupLocationId: pickupLocationId || undefined,
-    pickupLocationName: chosenHub,
-    renterId: user.id,
-    renterName: user.fullName,
-    renterPhone: renterPhone || user.phone,
-    renterEmail: renterEmail || user.email,
-    renterEnrollment: user.icfaiEnrollmentNumber,
-    renterAcademicYear: user.academicYear || resolvedYear,
-    renterCourse: user.course || resolvedCourse,
-    pickupDate,
-    returnDate,
-    durationHours: totalHours,
-    durationDays: days,
-    bookingStatus: 'pending_verification', // Initial state
-    verificationStatus: 'pending',
-    totalPrice: rentalTotal,
-    securityDeposit,
-    platformFee,
-    aadharDocument: aadharDoc,
-    drivingLicenseDocument: dlDoc,
-    studentIdDocument: studentIdDoc,
-    laptopDepositAcknowledged: Boolean(laptopDepositAcknowledged),
-    termsAccepted: true,
-    termsVersion: termsVersion || config.termsVersion || 'v1.2-2026-AUG',
-    termsAcceptedAt: new Date().toISOString(),
-    termsAcceptedIp: req.ip || 'campus-client',
-    paymentStatus: 'pending', // Transparently pending handover
-    handoverNotes: `Pickup at ${chosenHub}. Physical inspection of ID & ISI helmet required at handover.`,
-    qrCodePass: `RP-${generatedPassId}-${bike.registrationNumber.replace(/\s+/g, '')}`
-  });
-
-  db.logAdminAction({
-    adminId: user.id,
-    action: 'STUDENT_ACCEPTED_TERMS_AND_BOOKED',
-    targetType: 'terms',
-    targetId: newBooking.id,
-    metadata: {
-      renterEnrollment: user.icfaiEnrollmentNumber,
-      termsVersion: newBooking.termsVersion,
-      acceptedAt: newBooking.termsAcceptedAt,
-      bike: `${bike.brand} ${bike.model}`
-    }
-  });
-
-  // 8. Automated AI Document Check (Optical verification pipeline)
-  let dlVerdict: 'verified' | 'flagged' | 'manual_review' | 'rejected' = 'manual_review';
-  let aadharVerdict: 'verified' | 'flagged' | 'manual_review' | 'rejected' = 'manual_review';
-
-  if (dlDoc || aadharDoc) {
-    try {
-      if (dlDoc) {
-        const dlAnalysis = await verifyDocumentWithGemini({
-          documentBase64: dlDoc,
-          mimeType: 'image/jpeg',
-          expectedName: renterName,
-          expectedEnrollment: cleanEnrollment,
-          documentCategory: 'driving_license'
-        });
-
-        dlVerdict = dlAnalysis.verdict;
-
-        db.createVerification({
-          bookingId: newBooking.id,
-          renterId: user.id,
-          documentType: 'driving_license',
-          documentClassification: dlAnalysis.documentClassification,
-          verificationState: dlAnalysis.verificationState,
-          verificationResult: dlAnalysis.verdict,
-          extractedInformation: {
-            fullName: dlAnalysis.extractedFullName,
-            idNumber: dlAnalysis.extractedIdNumber,
-            dob: dlAnalysis.extractedDob,
-            expiryDate: dlAnalysis.extractedExpiryDate,
-            enrollmentNumber: dlAnalysis.extractedEnrollment,
-            matchedNameScore: dlAnalysis.nameMatchConfidence,
-            notes: dlAnalysis.reasons.join(' • ')
-          },
-          confidence: dlAnalysis.confidence,
-          reasons: dlAnalysis.reasons,
-          checks: dlAnalysis.checks,
-          manualReviewRequired: dlAnalysis.verificationState !== 'VERIFICATION PASSED',
-          verifiedBy: 'AI_VISION_OCR'
-        });
-      }
-
-      if (aadharDoc) {
-        const aadharAnalysis = await verifyDocumentWithGemini({
-          documentBase64: aadharDoc,
-          mimeType: 'image/jpeg',
-          expectedName: renterName,
-          expectedEnrollment: cleanEnrollment,
-          documentCategory: 'aadhar'
-        });
-
-        aadharVerdict = aadharAnalysis.verdict;
-
-        db.createVerification({
-          bookingId: newBooking.id,
-          renterId: user.id,
-          documentType: 'aadhar',
-          verificationState: aadharAnalysis.verificationState,
-          verificationResult: aadharAnalysis.verdict,
-          extractedInformation: {
-            fullName: aadharAnalysis.extractedFullName,
-            idNumber: aadharAnalysis.extractedIdNumber,
-            dob: aadharAnalysis.extractedDob,
-            matchedNameScore: aadharAnalysis.nameMatchConfidence,
-            notes: aadharAnalysis.reasons.join(' • ')
-          },
-          confidence: aadharAnalysis.confidence,
-          reasons: aadharAnalysis.reasons,
-          checks: aadharAnalysis.checks,
-          manualReviewRequired: aadharAnalysis.verificationState !== 'VERIFICATION PASSED',
-          verifiedBy: 'AI_VISION_OCR'
-        });
-      }
-
-      // Update verification status on booking based on AI analysis
-      const allPassed = dlVerdict === 'verified' && (!aadharDoc || aadharVerdict === 'verified');
-      const finalVerifStatus = allPassed ? 'approved' : 'manual_review';
-      db.updateBooking(newBooking.id, { verificationStatus: finalVerifStatus });
-      newBooking.verificationStatus = finalVerifStatus;
-
-    } catch (verifErr) {
-      console.warn('Non-blocking AI verification pipeline error:', verifErr);
-    }
-  }
-
-  res.status(201).json({
-    success: true,
-    booking: newBooking,
-    message: 'Booking request submitted in PENDING_VERIFICATION state. Documents queued for administrative clearance.'
-  });
-});
-
-app.put('/api/bookings/:id/status', requireAdmin, (req, res) => {
-  const { id } = req.params;
-  const updates = req.body;
-  const updated = db.updateBooking(id, updates);
-  if (!updated) {
+app.post('/api/bookings/:id/cancel', requireUser, (req: Request, res: Response) => {
+  const booking = db.getBookingById(req.params.id);
+  if (!booking) {
     return res.status(404).json({ error: 'Booking not found' });
   }
 
-  db.logAdminAction({
-    adminId: 'admin',
-    action: 'UPDATE_BOOKING_STATUS',
+  if (booking.userId !== req.user!.id && req.user!.role !== 'admin') {
+    return res.status(403).json({ error: 'You cannot cancel another student’s reservation' });
+  }
+
+  if (['COMPLETED', 'CANCELLED', 'REJECTED'].includes(booking.status)) {
+    return res.status(400).json({ error: `Cannot cancel a reservation marked as ${booking.status}` });
+  }
+
+  const reason = req.body.reason || 'Cancelled by renter';
+  const updated = db.updateBookingStatus(booking.id, 'CANCELLED', reason);
+
+  db.logAudit({
+    actorId: req.user!.id,
+    actorRole: req.user!.role,
+    action: 'CANCEL_BOOKING',
     targetType: 'booking',
-    targetId: id,
-    metadata: updates
+    targetId: booking.id,
+    diff: { previousStatus: booking.status, newStatus: 'CANCELLED', reason },
+    ipAddress: req.ip,
+    userAgent: req.headers['user-agent'],
   });
 
   res.json(updated);
 });
 
-// Pre-ride Handover Condition Record
-app.post('/api/bookings/:id/pickup-inspection', requireAdmin, (req, res) => {
-  const { id } = req.params;
-  const { odometerKm, fuelPercent, photos, notes, helmetIssued, laptopPhysicalDepositLogged, coordinatorName } = req.body;
-  
-  const booking = db.getBookingById(id);
-  if (!booking) {
-    return res.status(404).json({ error: 'Booking not found' });
+// ----------------------------------------------------
+// OWNER ONBOARDING (AUTHENTICATED STUDENT REQUIRED)
+// ----------------------------------------------------
+app.post('/api/owner/onboard', requireUser, ownerLimiter, (req: Request, res: Response) => {
+  const parseResult = OwnerOnboardingSchema.safeParse(req.body);
+  if (!parseResult.success) {
+    return res.status(400).json({
+      error: 'Validation failed for owner onboarding',
+      details: parseResult.error.flatten().fieldErrors,
+    });
   }
 
-  const pickupRecord = {
-    odometerKm: Number(odometerKm) || 0,
-    fuelPercent: Number(fuelPercent) || 100,
-    photos: photos || [],
-    notes: notes || 'Vehicle handed over in standard roadworthy condition.',
-    helmetIssued: Boolean(helmetIssued),
-    laptopPhysicalDepositLogged: Boolean(laptopPhysicalDepositLogged),
-    inspectedBy: coordinatorName || 'Admin Hub Coordinator',
-    timestamp: new Date().toISOString()
-  };
+  const data = parseResult.data;
+  const user = req.user!;
 
-  const updated = db.updateBooking(id, {
-    pickupConditionRecord: pickupRecord,
-    bookingStatus: 'active_rental',
-    paymentStatus: 'paid'
+  const hub = PLATFORM_CONFIG.hubs.find((h) => h.id === data.preferredHubId);
+
+  const createdBike = db.createBike({
+    ownerId: user.id,
+    brand: data.brand,
+    model: data.model,
+    year: data.year,
+    registrationNumber: data.registrationNumber,
+    registrationMasked: `${data.registrationNumber.slice(0, 4)}-****`,
+    displayRegistrationToPublic: false,
+    bikeType: data.bikeType,
+    fuelType: data.fuelType,
+    transmission: data.transmission,
+    hourlyRateInr: data.hourlyRateInr,
+    dailyRateInr: data.dailyRateInr,
+    securityDepositInr: 1500,
+    hubId: data.preferredHubId,
+    hubName: hub ? hub.name : 'Main Campus Gate (Gate 1)',
+    images: data.images,
+    features: ['ISI Helmet Included', 'Student Owner Inspected'],
+    availabilityStatus: 'AVAILABLE',
+    approvalStatus: 'PENDING_APPROVAL', // Strict: always requires admin review
   });
 
-  db.logAdminAction({
-    adminId: 'admin',
-    action: 'RECORD_PICKUP_INSPECTION_AND_HANDOVER',
-    targetType: 'inspection',
-    targetId: id,
-    metadata: {
-      odometer: pickupRecord.odometerKm,
-      fuel: pickupRecord.fuelPercent,
-      laptopDeposited: pickupRecord.laptopPhysicalDepositLogged,
-      inspectedBy: pickupRecord.inspectedBy
-    }
+  db.logAudit({
+    actorId: user.id,
+    actorRole: 'student',
+    action: 'SUBMIT_OWNER_ONBOARDING',
+    targetType: 'bike',
+    targetId: createdBike.id,
+    diff: { brand: data.brand, model: data.model, registration: data.registrationNumber },
+    ipAddress: req.ip,
+    userAgent: req.headers['user-agent'],
   });
 
-  res.json({ success: true, message: 'Pickup inspection recorded & rental activated', booking: updated });
+  res.status(201).json({
+    id: `own-listing-${createdBike.id}`,
+    bike: {
+      id: createdBike.id,
+      brand: createdBike.brand,
+      model: createdBike.model,
+      year: createdBike.year,
+      bikeType: createdBike.bikeType,
+      fuelType: createdBike.fuelType,
+      transmission: createdBike.transmission,
+      hourlyRateInr: createdBike.hourlyRateInr,
+      dailyRateInr: createdBike.dailyRateInr,
+      hubId: createdBike.hubId,
+      hubName: createdBike.hubName,
+      images: createdBike.images,
+      features: createdBike.features,
+      isInstantBooking: false,
+      rating: createdBike.rating,
+      totalTrips: 0,
+      conditionNotes: 'Pending coordinator physical check',
+      registrationMasked: createdBike.registrationMasked,
+    },
+    status: 'PENDING_APPROVAL',
+    adminNotes: 'Coordinator will inspect vehicle at designated hub.',
+    submittedAt: createdBike.createdAt,
+    earnings: {
+      totalRentedHours: 0,
+      totalGrossInr: 0,
+      netEarningsInr: 0,
+      payoutsPendingInr: 0,
+    },
+  });
 });
 
-// Post-ride Return Condition Record & Deposit Reconciliation
-app.post('/api/bookings/:id/return-inspection', requireAdmin, (req, res) => {
-  const { id } = req.params;
-  const {
-    odometerKm,
-    fuelPercent,
-    photos,
-    notes,
-    newDamagesIdentified,
-    damageNotes,
-    damageEstimatedCost,
-    fineOrChallanRecorded,
-    challanAmount,
-    challanDetails,
-    laptopReturnedToStudent,
-    depositDeductions,
-    depositRefundStatus,
-    coordinatorName
-  } = req.body;
+app.get('/api/owner/listings', requireUser, (req: Request, res: Response) => {
+  const allBikes = db.getBikes({});
+  const userListings = allBikes.filter((b) => b.ownerId === req.user!.id);
 
-  const booking = db.getBookingById(id);
-  if (!booking) {
-    return res.status(404).json({ error: 'Booking not found' });
+  const mapped = userListings.map((b) => ({
+    id: `own-listing-${b.id}`,
+    bike: {
+      id: b.id,
+      brand: b.brand,
+      model: b.model,
+      year: b.year,
+      bikeType: b.bikeType,
+      fuelType: b.fuelType,
+      transmission: b.transmission,
+      hourlyRateInr: b.hourlyRateInr,
+      dailyRateInr: b.dailyRateInr,
+      hubId: b.hubId,
+      hubName: b.hubName,
+      images: b.images,
+      features: b.features,
+      isInstantBooking: b.isInstantBooking,
+      rating: b.rating,
+      totalTrips: b.totalTrips,
+      conditionNotes: b.conditionNotes,
+      registrationMasked: b.registrationMasked,
+    },
+    status: b.approvalStatus,
+    adminNotes: b.adminNotes,
+    submittedAt: b.createdAt,
+    earnings: {
+      totalRentedHours: b.totalTrips * 4,
+      totalGrossInr: b.totalTrips * b.hourlyRateInr * 4,
+      netEarningsInr: Math.round(b.totalTrips * b.hourlyRateInr * 4 * 0.92),
+      payoutsPendingInr: 0,
+    },
+  }));
+
+  res.json(mapped);
+});
+
+// ----------------------------------------------------
+// DEDICATED FILE UPLOAD ROUTE (5MB Cap + Magic-Byte Sniffing)
+// ----------------------------------------------------
+app.post(
+  '/api/upload/documents',
+  requireUser,
+  documentUpload.fields([
+    { name: 'drivingLicence', maxCount: 1 },
+    { name: 'studentId', maxCount: 1 },
+  ]),
+  verifyMagicBytes,
+  (req: Request, res: Response) => {
+    const files = req.files as { [fieldname: string]: Express.Multer.File[] } | undefined;
+    if (!files) {
+      return res.status(400).json({ error: 'No documents provided for upload' });
+    }
+
+    const dlFile = files['drivingLicence']?.[0];
+    const studentIdFile = files['studentId']?.[0];
+
+    res.json({
+      success: true,
+      drivingLicencePath: dlFile ? `/uploads/${dlFile.filename}` : null,
+      studentIdPath: studentIdFile ? `/uploads/${studentIdFile.filename}` : null,
+    });
   }
+);
 
-  const returnRecord = {
-    odometerKm: Number(odometerKm) || 0,
-    fuelPercent: Number(fuelPercent) || 100,
-    photos: photos || [],
-    notes: notes || 'Vehicle returned and checked.',
-    newDamagesIdentified: Boolean(newDamagesIdentified),
-    damageNotes: damageNotes || '',
-    damageEstimatedCost: Number(damageEstimatedCost) || 0,
-    fineOrChallanRecorded: Boolean(fineOrChallanRecorded),
-    challanAmount: Number(challanAmount) || 0,
-    challanDetails: challanDetails || '',
-    laptopReturnedToStudent: Boolean(laptopReturnedToStudent),
-    inspectedBy: coordinatorName || 'Admin Hub Coordinator',
-    timestamp: new Date().toISOString()
-  };
-
-  const deductions = depositDeductions || {
-    damageDeduction: Number(damageEstimatedCost) || 0,
-    fuelDeduction: 0,
-    lateFeeDeduction: 0,
-    challanDeduction: Number(challanAmount) || 0,
-    netRefundAmount: Math.max(0, (booking.securityDeposit || 0) - (Number(damageEstimatedCost) || 0) - (Number(challanAmount) || 0)),
-    deductionNotes: damageNotes || ''
-  };
-
-  const refundStatus = depositRefundStatus || (returnRecord.newDamagesIdentified || returnRecord.fineOrChallanRecorded ? 'deduction_applied' : 'full_refund_authorized');
-
-  const updated = db.updateBooking(id, {
-    returnConditionRecord: returnRecord,
-    depositDeductions: deductions,
-    depositRefundStatus: refundStatus,
-    bookingStatus: 'completed',
-    paymentStatus: refundStatus === 'full_refund_authorized' ? 'deposit_refunded' : 'deposit_adjusted'
-  });
-
-  db.logAdminAction({
-    adminId: 'admin',
-    action: 'RECORD_RETURN_INSPECTION_AND_DEPOSIT_SETTLEMENT',
-    targetType: 'inspection',
-    targetId: id,
-    metadata: {
-      odometer: returnRecord.odometerKm,
-      fuel: returnRecord.fuelPercent,
-      damagesIdentified: returnRecord.newDamagesIdentified,
-      damageCost: returnRecord.damageEstimatedCost,
-      challans: returnRecord.fineOrChallanRecorded,
-      netRefund: deductions.netRefundAmount,
-      refundStatus
-    }
-  });
-
-  res.json({ success: true, message: 'Return condition logged and deposit settlement processed', booking: updated });
-});
-
-// 8. AI Document Verification Endpoint (Direct API)
-app.post('/api/verify-document', async (req, res) => {
+// ----------------------------------------------------
+// GEMINI ADVISORY OCR ENDPOINT
+// ----------------------------------------------------
+app.post('/api/verify-document', requireUser, geminiLimiter, async (req: Request, res: Response) => {
   const { documentBase64, mimeType, expectedName, expectedEnrollment, documentCategory } = req.body;
   if (!documentBase64 || !documentCategory) {
-    return res.status(400).json({ error: 'Document data and documentCategory are required' });
+    return res.status(400).json({ error: 'documentBase64 and documentCategory are required' });
   }
 
   try {
     const analysis = await verifyDocumentWithGemini({
       documentBase64,
       mimeType: mimeType || 'image/jpeg',
-      expectedName: expectedName || 'Student',
-      expectedEnrollment,
-      documentCategory
+      expectedName: expectedName || req.user!.fullName,
+      expectedEnrollment: expectedEnrollment || req.user!.icfaiEnrollment,
+      documentCategory: documentCategory === 'student_id' ? 'student_id' : 'driving_license',
     });
     res.json(analysis);
   } catch (error: any) {
@@ -1057,324 +928,34 @@ app.post('/api/verify-document', async (req, res) => {
   }
 });
 
-app.get('/api/admin/verifications', requireAdmin, (req, res) => {
-  res.json(db.getVerifications());
-});
-
-app.post('/api/admin/verifications/:id/review', requireAdmin, (req, res) => {
-  const { id } = req.params;
-  const { result, notes } = req.body;
-  const updated = db.updateVerification(id, {
-    verificationResult: result,
-    manualReviewRequired: false,
-    verifiedBy: 'Admin (Manual Review)'
-  });
-  if (!updated) {
-    return res.status(404).json({ error: 'Verification record not found' });
-  }
-
-  db.logAdminAction({
-    adminId: 'admin',
-    action: 'MANUAL_DOCUMENT_VERIFICATION_REVIEW',
-    targetType: 'verification',
-    targetId: id,
-    metadata: { result, notes }
-  });
-
-  res.json(updated);
-});
-
-// 9. Dynamic Campus Pickup Locations
-app.get('/api/pickup-locations', (req, res) => {
-  const activeOnly = req.query.all !== 'true';
-  const locations = db.getPickupLocations(activeOnly);
-  res.json(locations);
-});
-
-app.get('/api/admin/pickup-locations', requireAdmin, (req, res) => {
-  const locations = db.getPickupLocations(false);
-  res.json(locations);
-});
-
-app.post('/api/admin/pickup-locations', requireAdmin, (req, res) => {
-  const { name, hubCode, landmark, address, isActive, operatingHours, contactPhone, displayOrder } = req.body;
-  if (!name || !name.trim()) {
-    return res.status(400).json({ error: 'Pickup location name is required' });
-  }
-
-  const newLoc = db.createPickupLocation({
-    name: name.trim(),
-    hubCode: (hubCode || name.slice(0, 4)).toUpperCase().replace(/[^A-Z0-9]/g, ''),
-    landmark: landmark || '',
-    address: address || 'ICFAI University Hyderabad Campus, Shankarpally Rd, Dontanpally, Hyderabad, Telangana 501203',
-    isActive: isActive !== undefined ? Boolean(isActive) : true,
-    operatingHours: operatingHours || '07:00 AM - 10:30 PM (Daily)',
-    contactPhone: contactPhone || '+91 91210 98765',
-    displayOrder: Number(displayOrder) || 0
-  });
-
-  db.logAdminAction({
-    adminId: 'admin',
-    action: 'CREATE_PICKUP_LOCATION',
-    targetType: 'config',
-    targetId: newLoc.id,
-    metadata: { name: newLoc.name, hubCode: newLoc.hubCode }
-  });
-
-  res.status(201).json(newLoc);
-});
-
-app.put('/api/admin/pickup-locations/:id', requireAdmin, (req, res) => {
-  const { id } = req.params;
-  const updates = req.body;
-  const updated = db.updatePickupLocation(id, updates);
-  if (!updated) {
-    return res.status(404).json({ error: 'Pickup location not found' });
-  }
-
-  db.logAdminAction({
-    adminId: 'admin',
-    action: 'UPDATE_PICKUP_LOCATION',
-    targetType: 'config',
-    targetId: id,
-    metadata: updates
-  });
-
-  res.json(updated);
-});
-
-app.delete('/api/admin/pickup-locations/:id', requireAdmin, (req, res) => {
-  const { id } = req.params;
-  const loc = db.getPickupLocationById(id);
-  if (!loc) {
-    return res.status(404).json({ error: 'Pickup location not found' });
-  }
-  db.deletePickupLocation(id);
-
-  db.logAdminAction({
-    adminId: 'admin',
-    action: 'DELETE_PICKUP_LOCATION',
-    targetType: 'config',
-    targetId: id,
-    metadata: { name: loc.name }
-  });
-
-  res.json({ success: true, message: 'Pickup location removed' });
-});
-
-// 10. Handover Fast Actions & Communication Logs
-app.post('/api/admin/bookings/:id/handover', requireAdmin, (req, res) => {
-  const { id } = req.params;
-  const { notes, helmetIssued, laptopDepositLogged, coordinatorName } = req.body;
-  const booking = db.getBookingById(id);
-  if (!booking) {
-    return res.status(404).json({ error: 'Booking not found' });
-  }
-
-  const pickupRecord = {
-    odometerKm: booking.pickupConditionRecord?.odometerKm || 12000,
-    fuelPercent: booking.pickupConditionRecord?.fuelPercent || 80,
-    photos: booking.pickupConditionRecord?.photos || [],
-    notes: notes || 'Vehicle handed over at campus hub.',
-    helmetIssued: helmetIssued !== undefined ? Boolean(helmetIssued) : true,
-    laptopPhysicalDepositLogged: laptopDepositLogged !== undefined ? Boolean(laptopDepositLogged) : true,
-    inspectedBy: coordinatorName || 'Admin Hub Coordinator',
-    timestamp: new Date().toISOString()
-  };
-
-  const updated = db.updateBooking(id, {
-    bookingStatus: 'active_rental',
-    paymentStatus: 'paid',
-    pickupConditionRecord: pickupRecord
-  });
-
-  db.logAdminAction({
-    adminId: 'admin',
-    action: 'FAST_HANDOVER_ACTIVATION',
-    targetType: 'booking',
-    targetId: id,
-    metadata: { renter: booking.renterName, bike: `${booking.bikeBrand} ${booking.bikeModel}` }
-  });
-
-  res.json({ success: true, message: 'Vehicle handed over and rental activated.', booking: updated });
-});
-
-app.post('/api/admin/bookings/:id/return', requireAdmin, (req, res) => {
-  const { id } = req.params;
-  const { notes, coordinatorName } = req.body;
-  const booking = db.getBookingById(id);
-  if (!booking) {
-    return res.status(404).json({ error: 'Booking not found' });
-  }
-
-  const returnRecord = {
-    odometerKm: (booking.pickupConditionRecord?.odometerKm || 12000) + 45,
-    fuelPercent: booking.pickupConditionRecord?.fuelPercent || 80,
-    photos: [],
-    notes: notes || 'Returned in good condition. Deposit refund approved.',
-    newDamagesIdentified: false,
-    damageNotes: '',
-    damageEstimatedCost: 0,
-    fineOrChallanRecorded: false,
-    challanAmount: 0,
-    challanDetails: '',
-    laptopReturnedToStudent: true,
-    inspectedBy: coordinatorName || 'Admin Hub Coordinator',
-    timestamp: new Date().toISOString()
-  };
-
-  const updated = db.updateBooking(id, {
-    bookingStatus: 'completed',
-    paymentStatus: 'deposit_refunded',
-    depositRefundStatus: 'full_refund_authorized',
-    returnConditionRecord: returnRecord
-  });
-
-  db.logAdminAction({
-    adminId: 'admin',
-    action: 'FAST_RETURN_COMPLETION',
-    targetType: 'booking',
-    targetId: id,
-    metadata: { renter: booking.renterName, bike: `${booking.bikeBrand} ${booking.bikeModel}` }
-  });
-
-  res.json({ success: true, message: 'Vehicle return logged and deposit refund authorized.', booking: updated });
-});
-
-// Communication Logging & Notification API
-app.get('/api/admin/bookings/:id/communications', requireAdmin, (req, res) => {
-  const { id } = req.params;
-  const logs = db.getCommunicationLogs(id);
-  res.json(logs);
-});
-
-app.post('/api/admin/bookings/:id/send-email', requireAdmin, (req, res) => {
-  const { id } = req.params;
-  const { customMessage, emailType = 'booking_update' } = req.body;
-  const booking = db.getBookingById(id);
-  if (!booking) {
-    return res.status(404).json({ error: 'Booking not found' });
-  }
-
-  const subject = `[Riders Path ICFAI] Booking #${booking.id} - ${booking.bikeBrand} ${booking.bikeModel} Update`;
-  const messageBody = customMessage || `Hello ${booking.renterName},\n\nYour booking #${booking.id} for the ${booking.bikeBrand} ${booking.bikeModel} is currently marked as: ${booking.bookingStatus.toUpperCase()}.\nPickup Hub: ${booking.pickupHub}\nDates: ${new Date(booking.pickupDate).toLocaleString('en-IN')} to ${new Date(booking.returnDate).toLocaleString('en-IN')}.\n\nPlease ensure your Student ID and DL are presented at the hub.\n\nBest regards,\nRiders Path Campus Team`;
-
-  const isEmailConfigured = Boolean(process.env.SMTP_HOST || process.env.RESEND_API_KEY || process.env.SENDGRID_API_KEY);
-
-  let status: 'sent' | 'failed' | 'not_configured' = 'not_configured';
-  let responseMsg = 'Email service is not configured in this environment (no SMTP/Resend API key set in server environment). Notification logged for administrative record.';
-
-  if (isEmailConfigured) {
-    // If SMTP or Resend is configured, we would send the email here
-    status = 'sent';
-    responseMsg = `Email dispatched to ${booking.renterEmail}`;
-  }
-
-  const log = db.logCommunication({
-    bookingId: id,
-    channel: 'email',
-    recipient: booking.renterEmail,
-    subject,
-    message: messageBody,
-    status,
-    errorMessage: isEmailConfigured ? undefined : 'Service not configured (SMTP_HOST/RESEND_API_KEY unset)',
-    initiatedBy: 'admin'
-  });
-
-  res.json({
-    success: isEmailConfigured,
-    configured: isEmailConfigured,
-    message: responseMsg,
-    preview: {
-      recipient: booking.renterEmail,
-      subject,
-      body: messageBody
-    },
-    log
-  });
-});
-
-app.post('/api/admin/bookings/:id/send-whatsapp', requireAdmin, (req, res) => {
-  const { id } = req.params;
-  const { customMessage } = req.body;
-  const booking = db.getBookingById(id);
-  if (!booking) {
-    return res.status(404).json({ error: 'Booking not found' });
-  }
-
-  const rawPhone = booking.renterPhone || '';
-  const digitsOnly = rawPhone.replace(/[^0-9]/g, '');
-  const cleanPhone = digitsOnly.startsWith('91') && digitsOnly.length === 12 ? digitsOnly : (digitsOnly.length === 10 ? `91${digitsOnly}` : '919121098765');
-
-  const defaultMsg = `🏍️ *Riders Path ICFAI Booking Update*\n\nHello ${booking.renterName}!\nBooking ID: *#${booking.id}*\nBike: *${booking.bikeBrand} ${booking.bikeModel}*\nStatus: *${booking.bookingStatus.toUpperCase()}*\nPickup Hub: *${booking.pickupHub}*\n\n*Important:* Bring your Physical ICFAI Student ID and Driving License during pickup.`;
-  const messageBody = customMessage || defaultMsg;
-  const waLink = `https://wa.me/${cleanPhone}?text=${encodeURIComponent(messageBody)}`;
-
-  const isWhatsAppGatewayConfigured = Boolean(process.env.WHATSAPP_API_KEY || process.env.TWILIO_AUTH_TOKEN);
-
-  let status: 'sent' | 'failed' | 'not_configured' = 'not_configured';
-  let responseMsg = 'WhatsApp gateway API is not configured in this environment. Direct WhatsApp link generated for manual dispatch.';
-
-  if (isWhatsAppGatewayConfigured) {
-    status = 'sent';
-    responseMsg = `WhatsApp message sent directly to ${booking.renterPhone}`;
-  }
-
-  const log = db.logCommunication({
-    bookingId: id,
-    channel: 'whatsapp',
-    recipient: booking.renterPhone,
-    message: messageBody,
-    status,
-    errorMessage: isWhatsAppGatewayConfigured ? undefined : 'WhatsApp API gateway not configured (WHATSAPP_API_KEY unset)',
-    initiatedBy: 'admin'
-  });
-
-  res.json({
-    success: isWhatsAppGatewayConfigured,
-    configured: isWhatsAppGatewayConfigured,
-    message: responseMsg,
-    waLink,
-    preview: {
-      recipient: booking.renterPhone,
-      body: messageBody
-    },
-    log
-  });
-});
-
-// 11. Dashboard Real Operational Metrics
-app.get('/api/admin/metrics', requireAdmin, (req, res) => {
-  res.json(db.getDashboardMetrics());
-});
-
-app.get('/api/admin/actions', requireAdmin, (req, res) => {
-  res.json(db.getAdminActions());
+// ----------------------------------------------------
+// ADMIN OPERATIONS & AUDIT LOGS
+// ----------------------------------------------------
+app.get('/api/admin/actions', requireAdmin, (_req: Request, res: Response) => {
+  const actions = sqlite.prepare('SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT 100').all();
+  res.json(actions);
 });
 
 // ----------------------------------------------------
-// VITE MIDDLEWARE (DEV) & STATIC SERVING (PROD)
+// GLOBAL ERROR HANDLER (NEVER LEAKS STACK TRACES)
 // ----------------------------------------------------
-async function startServer() {
-  if (process.env.NODE_ENV !== 'production') {
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: 'spa',
-    });
-    app.use(vite.middlewares);
-  } else {
-    const distPath = path.join(process.cwd(), 'dist');
-    app.use(express.static(distPath));
-    app.get('*', (req, res) => {
-      res.sendFile(path.join(distPath, 'index.html'));
-    });
-  }
+app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
+  const status = err.status || err.statusCode || 500;
+  const message = status === 500 && env.NODE_ENV === 'production'
+    ? 'An internal server error occurred. Please contact campus desk.'
+    : err.message || 'An error occurred';
 
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Riders Path production-ready backend listening on http://0.0.0.0:${PORT}`);
+  res.status(status).json({
+    error: message,
+    code: err.code || 'SERVER_ERROR',
+  });
+});
+
+// ----------------------------------------------------
+// SERVER BOOTSTRAP
+// ----------------------------------------------------
+if (process.env.NODE_ENV !== 'test') {
+  const server = app.listen(env.PORT, () => {
+    console.log(`🚀 Riders Path API running securely on port ${env.PORT} [${env.NODE_ENV}]`);
   });
 }
-
-startServer().catch((err) => {
-  console.error('Failed to start server:', err);
-});
