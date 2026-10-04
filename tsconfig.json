@@ -17,10 +17,13 @@
     "jsx": "react-jsx",
     "paths": {
       "@/*": [
+        "./src/*",
         "./*"
       ]
     },
+    "types": ["vitest/globals", "@testing-library/jest-dom"],
     "allowImportingTsExtensions": true,
     "noEmit": true
-  }
+  },
+  "include": ["src", "vitest.config.ts", "vite.config.ts"]
 }
