@@ -23,6 +23,36 @@ import { ErrorState } from '../components/ui/ErrorState';
 import { Modal } from '../components/ui/Modal';
 import { useAuth } from '../context/AuthContext';
 import { useToast } from '../components/ui/Toast';
+import { Input } from '../components/ui/Input';
+
+const BOOKING_STAGES: Array<{ status: BookingStatus; label: string }> = [
+  { status: 'PENDING_VERIFICATION', label: 'Team review' },
+  { status: 'CONFIRMED', label: 'Confirmed' },
+  { status: 'ACTIVE', label: 'In progress' },
+  { status: 'COMPLETED', label: 'Completed' },
+];
+
+const BookingTimeline: React.FC<{ status: BookingStatus }> = ({ status }) => {
+  const currentIndex = BOOKING_STAGES.findIndex((stage) => stage.status === status);
+  const isClosed = status === 'CANCELLED' || status === 'REJECTED';
+  return (
+    <section aria-label="Booking status timeline">
+      <ol className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+        {BOOKING_STAGES.map((stage, index) => {
+          const complete = !isClosed && currentIndex > index;
+          const current = !isClosed && currentIndex === index;
+          return (
+            <li key={stage.status} aria-current={current ? 'step' : undefined} className={`min-h-[44px] rounded-xl border px-3 py-2 text-xs flex items-center gap-2 ${complete ? 'border-emerald-800 bg-emerald-950/30 text-emerald-200' : current ? 'border-amber-600 bg-amber-500/10 text-amber-200' : 'border-neutral-800 bg-neutral-950/50 text-neutral-400'}`}>
+              <span aria-hidden="true" className="w-2 h-2 rounded-full bg-current shrink-0" />
+              <span>{stage.label}</span>
+            </li>
+          );
+        })}
+      </ol>
+      {isClosed && <p role="status" className="mt-2 text-xs text-neutral-300">Booking closed: {status === 'REJECTED' ? 'not approved' : 'cancelled'}.</p>}
+    </section>
+  );
+};
 
 export const MyBookingsPage: React.FC = () => {
   const { user, openAuthModal } = useAuth();
@@ -72,7 +102,7 @@ export const MyBookingsPage: React.FC = () => {
       await apiClient.cancelBooking(bookingToCancel.id, cancelReason || 'Cancelled by student');
       toast.info('Booking Cancelled', 'Your reservation was cancelled successfully.');
       setCancelModalOpen(false);
-      fetchBookings();
+      await fetchBookings();
     } catch (err: any) {
       toast.error('Cancellation Failed', err.message || 'Could not cancel booking.');
     } finally {
@@ -88,7 +118,7 @@ export const MyBookingsPage: React.FC = () => {
       case 'ACTIVE':
         return <Badge variant="accent">RIDE IN PROGRESS</Badge>;
       case 'PENDING_VERIFICATION':
-        return <Badge variant="warning">PENDING CLEARANCE</Badge>;
+        return <Badge variant="warning">PENDING REVIEW</Badge>;
       case 'COMPLETED':
         return <Badge variant="default">COMPLETED</Badge>;
       case 'CANCELLED':
@@ -102,33 +132,33 @@ export const MyBookingsPage: React.FC = () => {
     switch (status) {
       case 'CONFIRMED':
         return {
-          title: 'Next Step: Proceed to Pickup Hub',
-          desc: `Head to ${hub} at your booked time. Bring your physical ICFAI student ID card and selected security deposit (laptop/cash). Coordinator will verify and hand over keys.`,
+          title: 'Next step: attend the handover',
+          desc: `Meet at ${hub} at the booked time. Bring the selected deposit option and check the vehicle condition with the owner before handover.`,
           type: 'info',
         };
       case 'ACTIVE':
         return {
           title: 'Active Ride in Progress',
-          desc: 'Ride safely and obey campus speed limit (25 km/h). Mandatory ISI helmet at all times. Return to designated hub before slot end.',
+          desc: 'Your rental is in progress. Follow applicable road and campus safety rules, and return the vehicle to the selected hub by the booked end time.',
           type: 'accent',
         };
       case 'PENDING_VERIFICATION':
         return {
-          title: 'Coordinator Verification Underway',
-          desc: 'Our student coordinator is reviewing your Driving Licence and student credentials. You will receive handover clearance shortly.',
+          title: 'Waiting for team review',
+          desc: 'Your request is awaiting document review. Check this page for status changes; wait for confirmation before pickup.',
           type: 'warning',
         };
       case 'COMPLETED':
         return {
-          title: 'Rental Completed & Deposit Returned',
-          desc: 'Handover inspection cleared. Deposit returned. Thank you for keeping the ICFAI campus community safe!',
+          title: 'Rental marked complete',
+          desc: 'This booking is marked complete. For a deposit update, follow the agreed handover terms or contact the owner or campus team.',
           type: 'default',
         };
       case 'CANCELLED':
       case 'REJECTED':
         return {
-          title: 'Reservation Closed',
-          desc: 'This booking is cancelled. No charges or penalties incurred.',
+          title: 'Booking closed',
+          desc: 'This booking will not proceed. Review any cancellation or review note attached to the booking.',
           type: 'danger',
         };
     }
@@ -164,10 +194,8 @@ export const MyBookingsPage: React.FC = () => {
           </p>
         </div>
 
-        <Link to="/browse">
-          <Button size="sm" variant="outline" rightIcon={<ArrowRight className="w-3.5 h-3.5" />}>
-            Book Another Ride
-          </Button>
+        <Link to="/browse" className="inline-flex min-h-[44px] items-center gap-2 rounded-xl border border-neutral-700 px-3.5 py-2 text-xs font-medium text-neutral-200 hover:bg-neutral-900 focus-visible:ring-2 focus-visible:ring-amber-500">
+          Book Another Ride <ArrowRight className="w-3.5 h-3.5" aria-hidden="true" />
         </Link>
       </div>
 
@@ -199,7 +227,7 @@ export const MyBookingsPage: React.FC = () => {
         <div className="flex flex-col gap-6">
           {bookings.map((b) => {
             const nextStep = getNextStepGuidance(b.status, b.pickupHubName);
-            const canCancel = b.status === 'CONFIRMED' || b.status === 'PENDING_VERIFICATION';
+            const canCancel = ['CONFIRMED', 'PENDING_VERIFICATION', 'ACTIVE'].includes(b.status);
 
             return (
               <Card key={b.id} className="p-6 border-neutral-800 flex flex-col gap-5">
@@ -220,7 +248,7 @@ export const MyBookingsPage: React.FC = () => {
                     <QrCode className="w-5 h-5 text-amber-400 shrink-0" />
                     <div>
                       <span className="text-[10px] text-neutral-500 uppercase tracking-wider block">
-                        Handover Code
+                        {b.status === 'CONFIRMED' || b.status === 'ACTIVE' ? 'Handover Code' : 'Booking Reference'}
                       </span>
                       <span className="text-base font-black font-mono text-amber-400">
                         {b.handoverCode}
@@ -228,6 +256,9 @@ export const MyBookingsPage: React.FC = () => {
                     </div>
                   </div>
                 </div>
+
+                <BookingTimeline status={b.status} />
+                {b.cancellationReason && <p className="text-xs text-neutral-400">Booking note: {b.cancellationReason}</p>}
 
                 {/* Details grid */}
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-xs">
@@ -292,8 +323,14 @@ export const MyBookingsPage: React.FC = () => {
       >
         <div className="flex flex-col gap-4">
           <p className="text-xs text-neutral-300">
-            Cancelling frees up the vehicle for other students at {bookingToCancel?.pickupHubName}. There are no cancellation penalties.
+            Cancel this booking at {bookingToCancel?.pickupHubName}? This action cannot be undone. Check the current refund and deposit terms before proceeding.
           </p>
+          <Input
+            label="Reason (optional)"
+            value={cancelReason}
+            onChange={(event) => setCancelReason(event.target.value)}
+            maxLength={300}
+          />
 
           <div className="flex gap-3 justify-end pt-2">
             <Button variant="outline" size="sm" onClick={() => setCancelModalOpen(false)}>
@@ -304,6 +341,7 @@ export const MyBookingsPage: React.FC = () => {
               size="sm"
               onClick={handleConfirmCancel}
               isLoading={isCancelling}
+              disabled={isCancelling}
             >
               Confirm Cancellation
             </Button>

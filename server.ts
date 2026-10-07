@@ -344,18 +344,22 @@ app.post('/api/auth/otp/verify', authLimiter, (req: Request, res: Response) => {
       });
     }
 
+    const wasExpired = latestOtp && new Date(latestOtp.expires_at).getTime() <= Date.now();
+
     db.logAudit({
       actorId: emailHash,
       actorRole: 'student',
       action: 'OTP_VERIFY_FAILURE',
       targetType: 'auth',
-      targetId: 'inactive_or_expired',
+      targetId: wasExpired ? 'expired' : 'inactive_or_expired',
       ipAddress: req.ip,
       userAgent: req.headers['user-agent'],
     });
     return res.status(400).json({
-      error: 'Invalid or expired verification code. Please request a new code.',
-      code: 'INVALID_OTP',
+      error: wasExpired
+        ? 'This verification code has expired. Please request a new code.'
+        : 'Invalid verification code. Please check it and try again.',
+      code: wasExpired ? 'OTP_EXPIRED' : 'INVALID_OTP',
     });
   }
 

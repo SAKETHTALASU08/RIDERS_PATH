@@ -75,7 +75,15 @@ async function request<T>(
   if (!response.ok) {
     let errorData: ApiErrorShape;
     try {
-      errorData = await response.json();
+      const responseError = await response.json();
+      const rawFieldErrors = responseError.fieldErrors || responseError.details;
+      const fieldErrors = rawFieldErrors && typeof rawFieldErrors === 'object'
+        ? Object.fromEntries(Object.entries(rawFieldErrors).map(([field, message]) => [
+          field,
+          Array.isArray(message) ? String(message[0] || 'Invalid value') : String(message),
+        ]))
+        : undefined;
+      errorData = { ...responseError, fieldErrors } as ApiErrorShape;
     } catch {
       errorData = {
         message: response.statusText || 'An unexpected server error occurred',
@@ -111,11 +119,20 @@ export const apiClient = {
     if (params.bikeType) searchParams.set('bikeType', params.bikeType);
     if (params.fuelType) searchParams.set('fuelType', params.fuelType);
     if (params.hubId) searchParams.set('hubId', params.hubId);
-    if (params.maxHourlyRate) searchParams.set('maxHourlyRate', String(params.maxHourlyRate));
+    if (params.maxHourlyRate !== undefined) searchParams.set('maxHourlyRate', String(params.maxHourlyRate));
     if (params.sortBy) searchParams.set('sortBy', params.sortBy);
 
     const data = await request<unknown[]>(`/bikes?${searchParams.toString()}`);
-    return data.map((item) => PublicBikeDtoSchema.parse(item));
+    const bikes = data.map((item) => PublicBikeDtoSchema.parse(item));
+    const filtered = bikes.filter((bike) =>
+      (!params.transmission || params.transmission === 'all' || bike.transmission === params.transmission) &&
+      (params.maxHourlyRate === undefined || bike.hourlyRateInr <= params.maxHourlyRate)
+    );
+    if (params.sortBy === 'price_asc') filtered.sort((a, b) => a.hourlyRateInr - b.hourlyRateInr);
+    else if (params.sortBy === 'price_desc') filtered.sort((a, b) => b.hourlyRateInr - a.hourlyRateInr);
+    else if (params.sortBy === 'rating') filtered.sort((a, b) => b.rating - a.rating);
+    else filtered.sort((a, b) => b.totalTrips - a.totalTrips);
+    return filtered;
   },
 
   async getBikeById(id: string): Promise<PublicBikeDto> {

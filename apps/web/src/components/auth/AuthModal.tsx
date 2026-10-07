@@ -34,6 +34,7 @@ export const AuthModal: React.FC = () => {
   const [resendUntil, setResendUntil] = useState<number | null>(null);
   const [otpLocked, setOtpLocked] = useState(false);
   const [allowedDomains, setAllowedDomains] = useState<string[]>([]);
+  const [configError, setConfigError] = useState('');
   const [enrollmentRegex, setEnrollmentRegex] = useState(DEFAULT_ENROLLMENT_REGEX);
   const [enrollmentExample, setEnrollmentExample] = useState(DEFAULT_ENROLLMENT_EXAMPLE);
 
@@ -57,6 +58,7 @@ export const AuthModal: React.FC = () => {
   const [manualSubmitted, setManualSubmitted] = useState(false);
 
   const digitInputRefs = useRef<(HTMLInputElement | null)[]>([]);
+  const modalWasOpen = useRef(false);
 
   // Fetch allowed email domain from public config
   useEffect(() => {
@@ -74,14 +76,15 @@ export const AuthModal: React.FC = () => {
         if (typeof cfg.enrollmentFormatExample === 'string') setEnrollmentExample(cfg.enrollmentFormatExample);
       }
     }).catch(() => {
-      // Keep the shared permissive placeholder until the API configuration is reachable.
+      if (isMounted) setConfigError('Allowed campus email domains could not be loaded. The server will check eligibility when you request a code.');
     });
     return () => { isMounted = false; };
   }, []);
 
-  // Reset modal state when opened/closed
+  // Reset once each time the modal opens. A late /me response must not erase
+  // the email or OTP a student has already entered.
   useEffect(() => {
-    if (isAuthModalOpen) {
+    if (isAuthModalOpen && !modalWasOpen.current) {
       setStep(user?.emailVerified && !user.profileComplete ? 'profile' : 'email');
       setEmail('');
       setOtpDigits(['', '', '', '', '', '']);
@@ -90,7 +93,8 @@ export const AuthModal: React.FC = () => {
       setProfileErrors({});
       setManualSubmitted(false);
     }
-  }, [isAuthModalOpen, user?.emailVerified, user?.profileComplete]);
+    modalWasOpen.current = isAuthModalOpen;
+  }, [isAuthModalOpen]);
 
   const startResendCooldown = (seconds: number) => {
     const safeSeconds = Math.max(0, Math.ceil(seconds));
@@ -139,7 +143,9 @@ export const AuthModal: React.FC = () => {
         setStep('otp');
         startResendCooldown(cooldown);
       }
-      setErrorMessage(apiErrorMessage(err, 'Unable to process the verification request. Please try again.'));
+      setErrorMessage(err?.code === 'OTP_RATE_LIMITED' && cooldown > 0
+        ? `Too many code requests. Try again in ${cooldown} seconds.`
+        : apiErrorMessage(err, 'Unable to process the verification request. Please try again.'));
     } finally {
       setIsLoading(false);
     }
@@ -199,7 +205,14 @@ export const AuthModal: React.FC = () => {
       }
       const attempts = Number(err?.attemptsRemaining);
       const suffix = attempts > 0 ? ` ${attempts} attempt${attempts === 1 ? '' : 's'} remaining.` : '';
-      setErrorMessage(`${apiErrorMessage(err, 'Invalid or expired verification code.')}${suffix}`);
+      const message = code === 'OTP_EXPIRED'
+        ? 'That code has expired. Request a new code to continue.'
+        : code === 'INVALID_OTP'
+          ? 'That code is incorrect. Check it and try again, or request a new code.'
+        : code === 'OTP_LOCKED_OUT'
+          ? 'Too many incorrect attempts. Request a new code to continue.'
+          : apiErrorMessage(err, 'Unable to verify this code. Please try again.');
+      setErrorMessage(`${message}${suffix}`);
     } finally {
       setIsLoading(false);
     }
@@ -218,7 +231,9 @@ export const AuthModal: React.FC = () => {
     } catch (err: any) {
       const cooldown = Number(err?.cooldownSeconds ?? err?.retryAfterSeconds);
       if (cooldown > 0) startResendCooldown(cooldown);
-      setErrorMessage(apiErrorMessage(err, 'Unable to process the verification request. Please try again.'));
+      setErrorMessage(err?.code === 'OTP_RATE_LIMITED' && cooldown > 0
+        ? `Too many code requests. Try again in ${cooldown} seconds.`
+        : apiErrorMessage(err, 'Unable to process the verification request. Please try again.'));
     } finally {
       setIsLoading(false);
     }
@@ -288,10 +303,10 @@ export const AuthModal: React.FC = () => {
       description={
         step === 'email'
           ? allowedDomains.length > 0
-            ? `Passwordless sign-in with official university email (${allowedDomains.map((domain) => `@${domain}`).join(', ')})`
-            : 'Passwordless sign-in with your official university email'
+            ? `Use your college email (${allowedDomains.map((domain) => `@${domain}`).join(', ')}) to receive a one-time code.`
+            : 'Use your college email to request a one-time code.'
           : step === 'otp'
-          ? `Code dispatched to ${email}`
+          ? `If this address is eligible, a code will be sent to ${email}.`
           : step === 'manual'
           ? 'For students awaiting official campus email setup'
           : 'Provide your enrollment details for campus handover clearance'
@@ -303,7 +318,7 @@ export const AuthModal: React.FC = () => {
           <div className="p-3.5 rounded-xl bg-amber-500/10 border border-amber-500/20 text-xs text-amber-300 flex items-start gap-2.5">
             <ShieldCheck className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" aria-hidden="true" />
             <span>
-              Restricted to verified students of <strong>{PLATFORM_CONFIG.campusName}</strong>.
+              Use an allowed college email for <strong>{PLATFORM_CONFIG.campusName}</strong>. Email access is confirmed by code; licence documents are reviewed by the team.
             </span>
           </div>
 
@@ -323,7 +338,7 @@ export const AuthModal: React.FC = () => {
             error={errorMessage}
             helperText={allowedDomains.length > 0
               ? `Allowed domains: ${allowedDomains.map((d) => '@' + d).join(', ')}`
-              : 'Campus email domains are provided by the server configuration.'}
+              : configError || 'Allowed campus email domains are provided by the server configuration.'}
             leftIcon={<Mail className="w-4 h-4" />}
           />
 
@@ -512,7 +527,7 @@ export const AuthModal: React.FC = () => {
               <CheckCircle2 className="w-12 h-12 text-emerald-400" />
               <h3 className="font-semibold text-neutral-100">Verification Request Received</h3>
               <p className="text-sm text-neutral-400 max-w-sm">
-                A campus fleet coordinator will review your student credentials manually. Once approved, you will be notified at your contact email.
+                Your request was received. The campus team may contact you using the email address you provided.
               </p>
               <Button type="button" onClick={closeAuthModal} className="mt-4">
                 Done
@@ -522,7 +537,7 @@ export const AuthModal: React.FC = () => {
             <form onSubmit={handleManualSubmit} className="flex flex-col gap-3.5">
               <div className="p-3 rounded-xl bg-blue-500/10 border border-blue-500/20 text-xs text-blue-300 flex items-start gap-2">
                 <HelpCircle className="w-4 h-4 text-blue-400 shrink-0 mt-0.5" />
-                <span>Submit your details for human coordinator verification if your university email is pending.</span>
+                <span>Submit your details for the campus team to review if you cannot use an allowed college email.</span>
               </div>
 
               {errorMessage && (

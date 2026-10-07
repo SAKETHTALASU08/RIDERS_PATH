@@ -21,7 +21,7 @@ export const INITIAL_MOCK_BIKES: PublicBikeDto[] = [
     isInstantBooking: true,
     rating: 4.9,
     totalTrips: 64,
-    conditionNotes: 'Inspected by Block C Campus Coordinator; battery health 98%',
+    conditionNotes: 'Owner notes: battery health reported as 98%',
     registrationMasked: 'TS08-****',
   },
   {
@@ -66,7 +66,7 @@ export const INITIAL_MOCK_BIKES: PublicBikeDto[] = [
     isInstantBooking: false,
     rating: 4.95,
     totalTrips: 41,
-    conditionNotes: 'Student owner coordinator verified; strictly for experienced riders with valid DL',
+    conditionNotes: 'Owner notes: intended for experienced riders with a valid two-wheeler licence',
     registrationMasked: 'TS09-****',
   },
   {
@@ -110,7 +110,7 @@ export const INITIAL_MOCK_BIKES: PublicBikeDto[] = [
     isInstantBooking: false,
     rating: 4.88,
     totalTrips: 37,
-    conditionNotes: 'Thoroughly checked; comfortable for highway/city weekend trips',
+    conditionNotes: 'Owner notes: suitable for city and weekend rides',
     registrationMasked: 'TS10-****',
   },
   {

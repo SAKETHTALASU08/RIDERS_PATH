@@ -31,6 +31,14 @@ export const ROUTE_METADATA: Record<string, { title: string; description: string
     title: 'Student Sign In | Riders Path',
     description: 'Sign in with your campus email using a one-time verification code.',
   },
+  '/how-it-works': {
+    title: 'How It Works | Riders Path',
+    description: 'See how students browse, request a two-wheeler, and arrange a campus hub handover.',
+  },
+  '/faq': {
+    title: 'Student Bike Rental FAQ | Riders Path',
+    description: 'Answers about student eligibility, documents, deposits, and listing a two-wheeler.',
+  },
   '/terms': {
     title: 'Terms | Riders Path',
     description: 'Terms placeholder for Riders Path, pending legal review.',

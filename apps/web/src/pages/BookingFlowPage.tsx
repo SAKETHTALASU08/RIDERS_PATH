@@ -38,7 +38,7 @@ export const BookingFlowPage: React.FC = () => {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const location = useLocation();
-  const { user } = useAuth();
+  const { user, isLoading: isAuthLoading } = useAuth();
   const toast = useToast();
 
   const [bike, setBike] = useState<PublicBikeDto | null>(null);
@@ -58,6 +58,7 @@ export const BookingFlowPage: React.FC = () => {
   const [selectedHubId, setSelectedHubId] = useState('');
   const [depositType, setDepositType] = useState<'laptop' | 'cash_hub'>('laptop');
   const [step1Error, setStep1Error] = useState('');
+  const [bookingFieldErrors, setBookingFieldErrors] = useState<Record<string, string>>({});
 
   // Step 2: Server-calculated Pricing Breakdown
   const [pricing, setPricing] = useState<PricingBreakdown | null>(null);
@@ -94,6 +95,16 @@ export const BookingFlowPage: React.FC = () => {
       .finally(() => setIsLoadingBike(false));
   }, [id]);
 
+  useEffect(() => {
+    if (isAuthLoading || isLoadingBike || !bike) return;
+    if (!user || !user.emailVerified || !user.profileComplete) {
+      navigate('/signin', {
+        replace: true,
+        state: { returnTo: location.pathname, fallbackTo: id ? `/bikes/${id}` : '/browse' },
+      });
+    }
+  }, [bike, isAuthLoading, isLoadingBike, location.pathname, navigate, user]);
+
   const steps: StepItem[] = [
     { id: 1, title: 'Dates & Hub', description: 'Duration' },
     { id: 2, title: 'Server Pricing', description: 'Pay at Handover' },
@@ -109,13 +120,19 @@ export const BookingFlowPage: React.FC = () => {
 
     const start = new Date(startTime).getTime();
     const end = new Date(endTime).getTime();
+    const fieldErrors: Record<string, string> = {};
     if (isNaN(start) || isNaN(end) || end <= start) {
-      setStep1Error('Return time must be later than pickup time');
-      return;
+      fieldErrors.endTime = 'Return time must be later than pickup time.';
     }
-
     if (start < Date.now() + 30 * 60 * 1000) {
-      setStep1Error('Pickup time must be at least 30 minutes in advance');
+      fieldErrors.startTime = 'Choose a pickup time at least 30 minutes from now.';
+    }
+    if (!selectedHubId) {
+      fieldErrors.hub = 'Choose a pickup hub.';
+    }
+    setBookingFieldErrors(fieldErrors);
+    if (Object.keys(fieldErrors).length > 0) {
+      setStep1Error('Review the highlighted booking details.');
       return;
     }
 
@@ -152,12 +169,14 @@ export const BookingFlowPage: React.FC = () => {
     // Check type: images only
     if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) {
       setDocError(`${fieldName} must be a JPEG, PNG, or WebP image`);
+      e.target.value = '';
       return;
     }
 
     // Check size: <= 5MB
     if (file.size > 5 * 1024 * 1024) {
       setDocError(`${fieldName} size exceeds 5MB limit`);
+      e.target.value = '';
       return;
     }
 
@@ -165,6 +184,7 @@ export const BookingFlowPage: React.FC = () => {
     reader.onloadend = () => {
       setter(reader.result as string);
     };
+    reader.onerror = () => setDocError(`Could not read ${fieldName}. Choose another file.`);
     reader.readAsDataURL(file);
   };
 
@@ -222,7 +242,7 @@ export const BookingFlowPage: React.FC = () => {
       const booking = await apiClient.createBooking(payload);
       setConfirmedBooking(booking);
       setCurrentStep(4);
-      toast.success('Booking confirmed!', `Handover Code: ${booking.handoverCode}`);
+      toast.success('Booking request received', booking.status === 'CONFIRMED' ? 'Your booking is confirmed.' : 'Your request is awaiting team review.');
     } catch (err: any) {
       setSubmitError(err.message || 'Unable to confirm booking. Please try again.');
     } finally {
@@ -251,6 +271,10 @@ export const BookingFlowPage: React.FC = () => {
     );
   }
 
+  if (isAuthLoading || !user || !user.emailVerified || !user.profileComplete) {
+    return <div className="max-w-xl mx-auto px-4 py-16 text-sm text-neutral-300" role="status" aria-live="polite">Preparing sign-in…</div>;
+  }
+
   return (
     <div className="max-w-3xl mx-auto px-4 sm:px-6 py-8 w-full">
       {/* Header */}
@@ -266,10 +290,10 @@ export const BookingFlowPage: React.FC = () => {
         <div className="flex items-center justify-between">
           <div>
             <h1 className="text-2xl font-bold font-heading text-neutral-100">
-              Campus Rental Stepper
+              Book this bike
             </h1>
             <p className="text-xs text-neutral-400 mt-0.5">
-              Renting: <strong className="text-neutral-200">{bike.brand} {bike.model}</strong> ({bike.registrationMasked})
+              Renting: <strong className="text-neutral-200">{bike.brand} {bike.model}</strong>
             </p>
           </div>
           <Badge variant="accent" size="md">
@@ -301,7 +325,8 @@ export const BookingFlowPage: React.FC = () => {
               label="Pickup Date & Time"
               value={startTime}
               onChange={setStartTime}
-              min={new Date().toISOString()}
+              min={new Date(Date.now() + 30 * 60 * 1000).toISOString()}
+              error={bookingFieldErrors.startTime}
               required
             />
 
@@ -311,6 +336,7 @@ export const BookingFlowPage: React.FC = () => {
               value={endTime}
               onChange={setEndTime}
               min={startTime}
+              error={bookingFieldErrors.endTime}
               required
             />
           </div>
@@ -325,12 +351,13 @@ export const BookingFlowPage: React.FC = () => {
               label: `${h.name} (${h.code}) — ${h.operatingHours}`,
             }))}
             required
+            error={bookingFieldErrors.hub}
           />
 
           {/* Deposit Mode Selector */}
           <div className="flex flex-col gap-2 pt-2">
             <label className="text-xs font-semibold text-neutral-300">
-              Choose Security Deposit Mode (Refundable at Return)
+              Choose Deposit Option
             </label>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               {PLATFORM_CONFIG.depositPolicy.modes.map((mode) => (
@@ -369,6 +396,7 @@ export const BookingFlowPage: React.FC = () => {
           <Button
             onClick={handleProceedToPricing}
             isLoading={isCalculatingPrice}
+            disabled={isCalculatingPrice}
             className="w-full mt-2"
             rightIcon={<ArrowRight className="w-4 h-4" />}
           >
@@ -417,7 +445,7 @@ export const BookingFlowPage: React.FC = () => {
             </div>
 
             <div className="flex justify-between items-center text-neutral-300">
-              <span>Refundable Security Deposit ({pricing.depositType === 'laptop' ? 'Laptop' : '₹1,500 Cash'})</span>
+              <span>Deposit Option ({pricing.depositType === 'laptop' ? 'Laptop' : 'Cash'})</span>
               <span className="font-mono font-semibold text-neutral-100">
                 {pricing.depositInr > 0 ? `₹${pricing.depositInr}` : 'Physical Laptop'}
               </span>
@@ -437,7 +465,7 @@ export const BookingFlowPage: React.FC = () => {
             <div className="flex flex-col gap-0.5">
               <span className="font-bold">Pay at Campus Handover</span>
               <span className="text-[11px] text-amber-200/80">
-                You do not pay anything right now. Rental and deposit are settled with the student coordinator upon key collection.
+                Payment is due at handover. Review the rental, fee, and deposit amounts above before continuing.
               </span>
             </div>
           </div>
@@ -480,7 +508,7 @@ export const BookingFlowPage: React.FC = () => {
 
               <div className="h-40 border-2 border-dashed border-neutral-700 rounded-2xl flex flex-col items-center justify-center relative overflow-hidden bg-neutral-950/60 p-3">
                 {dlPreview ? (
-                  <img src={dlPreview} alt="DL Preview" className="w-full h-full object-contain" />
+                  <img src={dlPreview} alt="Driving licence preview" width={512} height={320} className="w-full h-full object-contain" />
                 ) : (
                   <div className="flex flex-col items-center text-center text-neutral-400">
                     <Upload className="w-6 h-6 text-neutral-500 mb-1" />
@@ -494,6 +522,7 @@ export const BookingFlowPage: React.FC = () => {
                   onChange={(e) => handleFileUpload(e, setDlPreview, 'Driving Licence')}
                   className="absolute inset-0 opacity-0 cursor-pointer"
                   aria-label="Upload Driving Licence photo"
+                  aria-describedby={docError ? 'booking-document-error' : undefined}
                 />
               </div>
             </div>
@@ -507,7 +536,7 @@ export const BookingFlowPage: React.FC = () => {
 
               <div className="h-40 border-2 border-dashed border-neutral-700 rounded-2xl flex flex-col items-center justify-center relative overflow-hidden bg-neutral-950/60 p-3">
                 {studentIdPreview ? (
-                  <img src={studentIdPreview} alt="ID Preview" className="w-full h-full object-contain" />
+                  <img src={studentIdPreview} alt="Student ID preview" width={512} height={320} className="w-full h-full object-contain" />
                 ) : (
                   <div className="flex flex-col items-center text-center text-neutral-400">
                     <Upload className="w-6 h-6 text-neutral-500 mb-1" />
@@ -521,6 +550,7 @@ export const BookingFlowPage: React.FC = () => {
                   onChange={(e) => handleFileUpload(e, setStudentIdPreview, 'Student ID Card')}
                   className="absolute inset-0 opacity-0 cursor-pointer"
                   aria-label="Upload Student ID Card photo"
+                  aria-describedby={docError ? 'booking-document-error' : undefined}
                 />
               </div>
             </div>
@@ -533,7 +563,7 @@ export const BookingFlowPage: React.FC = () => {
               <span>Data Collection & Privacy Purpose</span>
             </div>
             <p className="text-[11px] text-neutral-400 leading-relaxed">
-              We collect your Driving Licence and Student ID exclusively to verify that you are legally authorized to operate a two-wheeler and currently enrolled at ICFAI Hyderabad. Documents are used solely for vehicle custody verification during this rental cycle and are never shared with external marketers or third parties.
+              Submit a driving licence and student ID for team review as part of this booking request. The booking flow does not request Aadhaar. See the Privacy page placeholder for the notice pending review.
             </p>
 
             <label className="flex items-start gap-2.5 text-xs text-neutral-200 cursor-pointer select-none pt-1">
@@ -544,13 +574,13 @@ export const BookingFlowPage: React.FC = () => {
                 className="w-4 h-4 rounded text-amber-500 bg-neutral-800 border-neutral-700 focus:ring-amber-500 mt-0.5"
               />
               <span>
-                I confirm these documents are authentic, belong to me, and consent to their temporary inspection for this rental.
+                I confirm these documents are authentic and agree to submit them for team review.
               </span>
             </label>
           </div>
 
           {docError && (
-            <p role="alert" className="text-xs font-medium text-rose-400 bg-rose-950/30 p-3 rounded-xl border border-rose-900/50">
+            <p id="booking-document-error" role="alert" aria-live="polite" className="text-xs font-medium text-rose-400 bg-rose-950/30 p-3 rounded-xl border border-rose-900/50">
               {docError}
             </p>
           )}
@@ -579,7 +609,7 @@ export const BookingFlowPage: React.FC = () => {
               4. Review Safety Terms & Confirm
             </h2>
             <p className="text-xs text-neutral-400 mt-0.5">
-              Review and sign off on campus safety directives and rental compliance ({PLATFORM_CONFIG.termsVersion}).
+              Review the safety guidance and the current terms placeholder before sending your request ({PLATFORM_CONFIG.termsVersion}).
             </p>
           </div>
 
@@ -602,9 +632,9 @@ export const BookingFlowPage: React.FC = () => {
             <span>
               I accept the{' '}
               <Link to="/terms" target="_blank" className="text-amber-400 underline">
-                Riders Path Campus Rental Terms
+                Riders Path Terms placeholder
               </Link>{' '}
-              and agree to follow all traffic and university conduct regulations.
+              and agree to submit this booking request.
             </span>
           </label>
 
@@ -639,15 +669,17 @@ export const BookingFlowPage: React.FC = () => {
             <QrCode className="w-8 h-8" />
           </div>
 
-          <Badge variant="success" size="md" className="mb-2">
-            BOOKING CONFIRMED & CLEARANCE READY
+          <Badge variant={confirmedBooking.status === 'CONFIRMED' ? 'success' : 'warning'} size="md" className="mb-2">
+            {confirmedBooking.status === 'CONFIRMED' ? 'BOOKING CONFIRMED' : 'REQUEST RECEIVED · REVIEW PENDING'}
           </Badge>
 
           <h2 className="text-2xl font-bold font-heading text-neutral-100 mb-1">
-            Handover Gate Pass
+            Booking Pass
           </h2>
           <p className="text-xs text-neutral-400 mb-6">
-            Present this code to your campus hub coordinator to receive vehicle keys.
+            {confirmedBooking.status === 'CONFIRMED'
+              ? 'Present this pass at the selected campus hub at your booked time.'
+              : 'This is a request reference. Wait for the booking status to show confirmed before pickup.'}
           </p>
 
           {/* Pass Card Details */}
@@ -655,7 +687,7 @@ export const BookingFlowPage: React.FC = () => {
             <div className="flex justify-between items-center pb-3 border-b border-neutral-800">
               <div>
                 <span className="text-[10px] text-neutral-500 uppercase tracking-wider block">
-                  Handover Code
+                  {confirmedBooking.status === 'CONFIRMED' ? 'Handover Code' : 'Request Reference Code'}
                 </span>
                 <span className="text-2xl font-black font-mono text-amber-400">
                   {confirmedBooking.handoverCode}
@@ -700,15 +732,11 @@ export const BookingFlowPage: React.FC = () => {
           </div>
 
           <div className="flex flex-col sm:flex-row gap-3 w-full max-w-md">
-            <Link to="/my-bookings" className="flex-1">
-              <Button variant="primary" className="w-full">
-                View My Bookings
-              </Button>
+            <Link to="/my-bookings" className="inline-flex min-h-[44px] flex-1 items-center justify-center rounded-xl bg-amber-500 px-5 py-2.5 text-sm font-semibold text-slate-950 hover:bg-amber-400 focus-visible:ring-2 focus-visible:ring-amber-500">
+              View My Bookings
             </Link>
-            <Link to="/browse" className="flex-1">
-              <Button variant="outline" className="w-full">
-                Explore More Fleet
-              </Button>
+            <Link to="/browse" className="inline-flex min-h-[44px] flex-1 items-center justify-center rounded-xl border border-neutral-700 px-5 py-2.5 text-sm font-medium text-neutral-200 hover:bg-neutral-900 focus-visible:ring-2 focus-visible:ring-amber-500">
+              Explore More Fleet
             </Link>
           </div>
         </Card>

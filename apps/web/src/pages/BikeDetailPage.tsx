@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
 import {
   ArrowLeft,
@@ -13,6 +13,8 @@ import {
   Info,
   AlertCircle,
   ArrowRight,
+  ChevronLeft,
+  ChevronRight,
 } from 'lucide-react';
 import { PublicBikeDto, AvailabilityResponse } from '@riders-path/shared';
 import { apiClient } from '../api/client';
@@ -40,6 +42,31 @@ export const BikeDetailPage: React.FC = () => {
   const [checkEnd, setCheckEnd] = useState(defaultEnd);
   const [isCheckingAvailability, setIsCheckingAvailability] = useState(false);
   const [availabilityResult, setAvailabilityResult] = useState<AvailabilityResponse | null>(null);
+  const [availabilityError, setAvailabilityError] = useState<string | null>(null);
+  const [calendarMonth, setCalendarMonth] = useState(() => {
+    const now = new Date();
+    return new Date(now.getFullYear(), now.getMonth(), 1);
+  });
+  const [blockedRanges, setBlockedRanges] = useState<NonNullable<AvailabilityResponse['blockedRanges']>>([]);
+  const [calendarUnavailable, setCalendarUnavailable] = useState(false);
+  const [isLoadingCalendar, setIsLoadingCalendar] = useState(true);
+  const [calendarError, setCalendarError] = useState<string | null>(null);
+  const [calendarRetry, setCalendarRetry] = useState(0);
+
+  const calendarDays = useMemo(() => {
+    const daysInMonth = new Date(calendarMonth.getFullYear(), calendarMonth.getMonth() + 1, 0).getDate();
+    return Array.from({ length: daysInMonth }, (_, index) => new Date(calendarMonth.getFullYear(), calendarMonth.getMonth(), index + 1));
+  }, [calendarMonth]);
+
+  const calendarWeeks = useMemo(() => {
+    const leadingDays = new Date(calendarMonth.getFullYear(), calendarMonth.getMonth(), 1).getDay();
+    const cells: (Date | null)[] = [
+      ...Array.from({ length: leadingDays }, () => null),
+      ...calendarDays,
+    ];
+    while (cells.length % 7 !== 0) cells.push(null);
+    return Array.from({ length: cells.length / 7 }, (_, index) => cells.slice(index * 7, index * 7 + 7));
+  }, [calendarDays, calendarMonth]);
 
   useEffect(() => {
     if (!id) return;
@@ -52,14 +79,42 @@ export const BikeDetailPage: React.FC = () => {
       .finally(() => setIsLoading(false));
   }, [id]);
 
+  useEffect(() => {
+    if (!id) return;
+    let active = true;
+    const monthStart = new Date(calendarMonth.getFullYear(), calendarMonth.getMonth(), 1);
+    const nextMonth = new Date(calendarMonth.getFullYear(), calendarMonth.getMonth() + 1, 1);
+    setIsLoadingCalendar(true);
+    setCalendarError(null);
+    apiClient.checkAvailability(id, monthStart.toISOString(), nextMonth.toISOString())
+      .then((result) => {
+        if (!active) return;
+        const ranges = result.blockedRanges || [];
+        setBlockedRanges(ranges);
+        setCalendarUnavailable(!result.available && ranges.length === 0);
+      })
+      .catch((err: any) => {
+        if (active) setCalendarError(err.message || 'Unable to load blocked dates.');
+      })
+      .finally(() => { if (active) setIsLoadingCalendar(false); });
+    return () => { active = false; };
+  }, [id, calendarMonth, calendarRetry]);
+
   const handleCheckAvailability = async () => {
     if (!id || !checkStart || !checkEnd) return;
+    if (new Date(checkEnd) <= new Date(checkStart)) {
+      setAvailabilityError('Return time must be later than pickup time.');
+      setAvailabilityResult(null);
+      return;
+    }
+    setAvailabilityError(null);
     setIsCheckingAvailability(true);
     try {
       const res = await apiClient.checkAvailability(id, checkStart, checkEnd);
       setAvailabilityResult(res);
     } catch (err: any) {
-      setAvailabilityResult({ available: false, reason: err.message || 'Failed to check' });
+      setAvailabilityResult(null);
+      setAvailabilityError(err.message || 'Unable to check availability. Try again.');
     } finally {
       setIsCheckingAvailability(false);
     }
@@ -94,6 +149,12 @@ export const BikeDetailPage: React.FC = () => {
   }
 
   const hubDetails = PLATFORM_CONFIG.hubs.find((h) => h.id === bike.hubId);
+  const monthLabel = calendarMonth.toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
+  const blockedDate = (date: Date) => calendarUnavailable || blockedRanges.some((range) => {
+    const dayStart = new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
+    const dayEnd = new Date(date.getFullYear(), date.getMonth(), date.getDate() + 1).getTime();
+    return new Date(range.start).getTime() < dayEnd && new Date(range.end).getTime() > dayStart;
+  });
 
   return (
     <div className="max-w-6xl mx-auto px-4 sm:px-6 py-8 w-full">
@@ -115,6 +176,10 @@ export const BikeDetailPage: React.FC = () => {
               <img
                 src={bike.images[activeImageIndex] || bike.images[0]}
                 alt={`${bike.brand} ${bike.model}`}
+                width={1000}
+                height={750}
+                fetchPriority="high"
+                decoding="async"
                 className="w-full h-full object-cover"
               />
               <div className="absolute top-4 left-4 flex gap-2">
@@ -138,13 +203,13 @@ export const BikeDetailPage: React.FC = () => {
                     type="button"
                     onClick={() => setActiveImageIndex(idx)}
                     aria-label={`View photo ${idx + 1}`}
-                    className={`w-20 h-16 rounded-xl overflow-hidden border-2 cursor-pointer transition-all ${
+                    className={`min-w-[88px] min-h-[72px] rounded-xl overflow-hidden border-2 cursor-pointer transition-all ${
                       activeImageIndex === idx
                         ? 'border-amber-500 scale-105'
                         : 'border-neutral-800 opacity-60 hover:opacity-100'
                     }`}
                   >
-                    <img src={img} alt="Thumbnail" className="w-full h-full object-cover" />
+                    <img src={img} alt="" width={176} height={144} loading="lazy" decoding="async" className="w-full h-full object-cover" />
                   </button>
                 ))}
               </div>
@@ -166,6 +231,7 @@ export const BikeDetailPage: React.FC = () => {
             </div>
 
             <p className="text-xs sm:text-sm text-neutral-400">
+              <span className="font-semibold text-neutral-300">Owner-provided notes: </span>
               {bike.conditionNotes}
             </p>
           </div>
@@ -218,7 +284,7 @@ export const BikeDetailPage: React.FC = () => {
             <div className="flex items-start justify-between gap-4">
               <div>
                 <span className="text-xs font-mono text-amber-400 block mb-1">
-                  OFFICIAL CAMPUS PICKUP HUB
+                  PICKUP HUB
                 </span>
                 <h3 className="text-base font-bold text-neutral-100 flex items-center gap-2">
                   <MapPin className="w-4 h-4 text-amber-400" />
@@ -258,6 +324,57 @@ export const BikeDetailPage: React.FC = () => {
                 Max ₹{bike.dailyRateInr} per 24 hours
               </p>
             </div>
+
+            <section aria-label="Blocked dates calendar" className="mb-6 border-b border-neutral-800 pb-5">
+              <div className="flex items-center justify-between gap-2 mb-3">
+                <h2 className="text-sm font-bold text-neutral-100">Blocked Dates</h2>
+                <div className="flex items-center gap-1">
+                  <button type="button" aria-label="Previous month" onClick={() => setCalendarMonth((month) => new Date(month.getFullYear(), month.getMonth() - 1, 1))} className="min-w-[44px] min-h-[44px] rounded-lg text-neutral-300 hover:bg-neutral-800 focus-visible:ring-2 focus-visible:ring-amber-500">
+                    <ChevronLeft className="w-4 h-4 mx-auto" aria-hidden="true" />
+                  </button>
+                  <button type="button" aria-label="Next month" onClick={() => setCalendarMonth((month) => new Date(month.getFullYear(), month.getMonth() + 1, 1))} className="min-w-[44px] min-h-[44px] rounded-lg text-neutral-300 hover:bg-neutral-800 focus-visible:ring-2 focus-visible:ring-amber-500">
+                    <ChevronRight className="w-4 h-4 mx-auto" aria-hidden="true" />
+                  </button>
+                </div>
+              </div>
+              <p className="text-xs font-medium text-neutral-300 mb-3" aria-live="polite">{monthLabel}</p>
+              {isLoadingCalendar ? (
+                <p role="status" className="text-xs text-neutral-400">Loading calendar…</p>
+              ) : calendarError ? (
+                <div className="flex flex-col items-start gap-2">
+                  <p role="alert" aria-live="polite" className="text-xs text-rose-300">{calendarError}</p>
+                  <button type="button" onClick={() => setCalendarRetry((attempt) => attempt + 1)} className="min-h-[44px] px-2 text-xs font-semibold text-amber-400 underline underline-offset-4 focus-visible:ring-2 focus-visible:ring-amber-500 rounded-lg">Retry calendar</button>
+                </div>
+              ) : (
+                <>
+                  <table className="w-full table-fixed text-center text-xs" aria-label={`${monthLabel} availability`}>
+                    <caption className="sr-only">Blocked dates for {monthLabel}</caption>
+                    <thead>
+                      <tr>{['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa'].map((day) => <th key={day} scope="col" className="py-1 font-medium text-neutral-400">{day}</th>)}</tr>
+                    </thead>
+                    <tbody>
+                      {calendarWeeks.map((week, weekIndex) => (
+                        <tr key={`week-${weekIndex}`}>
+                          {week.map((date, dayIndex) => {
+                            if (!date) return <td key={`empty-${weekIndex}-${dayIndex}`} aria-hidden="true" />;
+                            const isBlocked = blockedDate(date);
+                            return (
+                              <td key={date.toISOString()} className="py-0.5">
+                                <time dateTime={date.toISOString()} aria-label={`${date.toLocaleDateString()}: ${isBlocked ? 'unavailable' : 'no blocked reservation listed'}`} className={`min-h-9 w-full flex items-center justify-center rounded-lg ${isBlocked ? 'bg-rose-950/60 text-rose-200 line-through' : 'text-neutral-200'}`}>
+                                  {date.getDate()}
+                                </time>
+                              </td>
+                            );
+                          })}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  <div className="mt-3 flex items-center gap-2 text-[11px] text-neutral-400"><span className="w-3 h-3 rounded bg-rose-950/60 border border-rose-800" aria-hidden="true" /> Unavailable</div>
+                  {calendarUnavailable && <p className="mt-2 text-xs text-neutral-300">This vehicle is currently marked unavailable.</p>}
+                </>
+              )}
+            </section>
 
             {/* Live Availability Checker */}
             <div className="flex flex-col gap-3.5 mb-6">
@@ -306,7 +423,7 @@ export const BikeDetailPage: React.FC = () => {
                       <div>
                         <p className="font-semibold">Available for booking!</p>
                         <p className="text-[11px] text-emerald-300/80 mt-0.5">
-                          Coordinator ready at {bike.hubName}.
+                          This slot was available when checked. Continue to booking to submit a request.
                         </p>
                       </div>
                     </>
@@ -323,26 +440,20 @@ export const BikeDetailPage: React.FC = () => {
                   )}
                 </div>
               )}
+              {availabilityError && <p role="alert" aria-live="polite" className="text-xs text-rose-300">{availabilityError}</p>}
             </div>
 
             {/* Direct Booking CTA */}
-            <Link to={`/book/${bike.id}`}>
-              <Button
-                variant="primary"
-                size="lg"
-                className="w-full text-base font-bold shadow-lg shadow-amber-500/10"
-                rightIcon={<ArrowRight className="w-4 h-4" />}
-              >
-                Proceed to Book
-              </Button>
+            <Link to={`/book/${bike.id}`} className="inline-flex min-h-[52px] w-full items-center justify-center gap-2 rounded-xl bg-amber-500 px-6 py-3.5 text-base font-bold text-slate-950 shadow-lg shadow-amber-500/10 hover:bg-amber-400 focus-visible:ring-2 focus-visible:ring-amber-500">
+              Proceed to Book <ArrowRight className="w-4 h-4" aria-hidden="true" />
             </Link>
 
             <div className="mt-4 pt-4 border-t border-neutral-800 text-[11px] text-neutral-400 flex flex-col gap-1.5">
               <span className="flex items-center gap-1.5 text-neutral-300">
                 <ShieldCheck className="w-3.5 h-3.5 text-amber-400" />
-                <span>Zero online prepayment — Pay at Handover</span>
+              <span>Pay at Handover</span>
               </span>
-              <span>• Refundable deposit: Laptop or ₹1,500</span>
+              <span>• Deposit options and amount appear in the booking flow</span>
               <span>• Mandatory ICFAI Student ID at pickup</span>
             </div>
           </Card>

@@ -63,7 +63,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const submitManualVerification = async (data: { name: string; enrollmentNumber: string; alternateEmail: string; note?: string }) => {
     const res = await apiClient.submitManualVerification(data);
-    toast.info('Verification Submitted', 'A campus coordinator will verify your student ID manually.');
+    toast.info('Request Submitted', 'The team will review your student details.');
     return res;
   };
 
@@ -84,6 +84,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         requestOtp,
         verifyOtp,
         completeProfile,
+        submitManualVerification,
         logout,
         refreshUser,
       }}

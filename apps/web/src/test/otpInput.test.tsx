@@ -1,6 +1,6 @@
 import React from 'react';
 import { describe, it, expect, vi } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { AuthModal } from '../components/auth/AuthModal';
 import { AuthProvider, useAuth } from '../context/AuthContext';
@@ -14,6 +14,27 @@ const TestAuthTrigger = () => {
 };
 
 describe('OTP Input & Authentication Flow', () => {
+  it('accepts a pasted six-digit code and advances to profile completion', async () => {
+    const user = userEvent.setup();
+    render(
+      <ToastProvider>
+        <AuthProvider>
+          <TestAuthTrigger />
+          <AuthModal />
+        </AuthProvider>
+      </ToastProvider>
+    );
+
+    await user.click(screen.getByText('Open Auth'));
+    await user.type(screen.getByLabelText(/college email address/i), `new.student+${Date.now()}@student.example.edu`);
+    await user.click(screen.getByRole('button', { name: /send verification code/i }));
+    await screen.findByLabelText('Digit 1 of 6');
+    screen.getByLabelText('Digit 1 of 6').focus();
+    await user.paste('123456');
+
+    expect(await screen.findByText(/complete student profile/i)).toBeInTheDocument();
+  });
+
   it('keeps domain eligibility server-side and shows a generic next step', async () => {
     const user = userEvent.setup();
     render(

@@ -63,14 +63,8 @@ export const Navbar: React.FC = () => {
           <ThemeToggle />
           {user ? (
             <div className="flex items-center gap-2.5">
-              <Link to="/my-bookings">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  leftIcon={<CalendarCheck className="w-3.5 h-3.5 text-amber-400" />}
-                >
-                  My Bookings
-                </Button>
+              <Link to="/my-bookings" className="inline-flex min-h-[44px] items-center gap-2 rounded-xl border border-neutral-700 px-3.5 py-2 text-xs font-medium text-neutral-200 hover:bg-neutral-900 focus-visible:ring-2 focus-visible:ring-amber-500">
+                <CalendarCheck className="w-3.5 h-3.5 text-amber-400" aria-hidden="true" /> My Bookings
               </Link>
 
               <div className="flex items-center gap-2 pl-2 border-l border-neutral-800">

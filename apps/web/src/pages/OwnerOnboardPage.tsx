@@ -22,6 +22,7 @@ import { Skeleton } from '../components/ui/Skeleton';
 import { PLATFORM_CONFIG } from '@riders-path/shared';
 import { useAuth } from '../context/AuthContext';
 import { useToast } from '../components/ui/Toast';
+import { ErrorState } from '../components/ui/ErrorState';
 
 export const OwnerOnboardPage: React.FC = () => {
   const { user, openAuthModal } = useAuth();
@@ -30,6 +31,8 @@ export const OwnerOnboardPage: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'onboard' | 'listings' | 'earnings'>('onboard');
   const [listings, setListings] = useState<OwnerListing[]>([]);
   const [isLoadingListings, setIsLoadingListings] = useState(false);
+  const [listingsError, setListingsError] = useState<string | null>(null);
+  const [uploadErrors, setUploadErrors] = useState<Record<string, string>>({});
 
   // Form fields
   const [brand, setBrand] = useState('');
@@ -50,17 +53,19 @@ export const OwnerOnboardPage: React.FC = () => {
 
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [formError, setFormError] = useState('');
+  const [formFieldErrors, setFormFieldErrors] = useState<Record<string, string>>({});
   const [submissionSuccess, setSubmissionSuccess] = useState(false);
 
   const [idempotencyKey] = useState(() => 'idemp_own_' + Math.random().toString(36).substring(2, 10));
 
   const fetchListings = async () => {
     setIsLoadingListings(true);
+    setListingsError(null);
     try {
       const data = await apiClient.getOwnerListings();
       setListings(data);
-    } catch {
-      // Ignored
+    } catch (err: any) {
+      setListingsError(err.message || 'Unable to load your listings. Please try again.');
     } finally {
       setIsLoadingListings(false);
     }
@@ -74,18 +79,33 @@ export const OwnerOnboardPage: React.FC = () => {
 
   const handleFileUpload = (
     e: React.ChangeEvent<HTMLInputElement>,
-    setter: (preview: string) => void
+    setter: (preview: string) => void,
+    fieldName: string,
+    errorKey: string
   ) => {
     const file = e.target.files?.[0];
     if (!file) return;
+    setUploadErrors((current) => ({ ...current, [errorKey]: '' }));
+    if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) {
+      setUploadErrors((current) => ({ ...current, [errorKey]: `${fieldName} must be a JPEG, PNG, or WebP image.` }));
+      e.target.value = '';
+      return;
+    }
+    if (file.size > 5 * 1024 * 1024) {
+      setUploadErrors((current) => ({ ...current, [errorKey]: `${fieldName} must be 5 MB or smaller.` }));
+      e.target.value = '';
+      return;
+    }
     const reader = new FileReader();
     reader.onloadend = () => setter(reader.result as string);
+    reader.onerror = () => setUploadErrors((current) => ({ ...current, [errorKey]: `Could not read ${fieldName}. Choose another file.` }));
     reader.readAsDataURL(file);
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setFormError('');
+    setFormFieldErrors({});
 
     if (!user || !user.emailVerified || !user.profileComplete) {
       openAuthModal();
@@ -132,10 +152,11 @@ export const OwnerOnboardPage: React.FC = () => {
       };
 
       await apiClient.submitOwnerOnboarding(payload);
-      toast.success('Listing Submitted!', 'Campus coordinator will inspect your vehicle at the hub.');
+      toast.success('Listing request received', 'You can follow its review status in My Listings.');
       setSubmissionSuccess(true);
       fetchListings();
     } catch (err: any) {
+      setFormFieldErrors(err.fieldErrors || {});
       setFormError(err.message || 'Failed to submit bike for onboarding');
     } finally {
       setIsSubmitting(false);
@@ -155,16 +176,17 @@ export const OwnerOnboardPage: React.FC = () => {
             List Your Two-Wheeler
           </h1>
           <p className="text-xs sm:text-sm text-neutral-400 mt-1">
-            Turn your idle campus ride into passive student income. Retain 92% of earnings.
+            Submit your bike for review, then track its status and reported earnings here.
           </p>
         </div>
 
         {/* Tab switcher */}
-        <div className="flex bg-neutral-900 border border-neutral-800 p-1 rounded-xl text-xs font-semibold">
+        <div className="flex flex-wrap bg-neutral-900 border border-neutral-800 p-1 rounded-xl text-xs font-semibold" role="group" aria-label="Owner dashboard sections">
           <button
             type="button"
+            aria-pressed={activeTab === 'onboard'}
             onClick={() => setActiveTab('onboard')}
-            className={`min-h-[36px] px-3.5 rounded-lg transition-colors cursor-pointer ${
+          className={`min-h-[44px] px-3.5 rounded-lg transition-colors cursor-pointer ${
               activeTab === 'onboard'
                 ? 'bg-neutral-800 text-amber-400'
                 : 'text-neutral-400 hover:text-neutral-200'
@@ -174,8 +196,9 @@ export const OwnerOnboardPage: React.FC = () => {
           </button>
           <button
             type="button"
+            aria-pressed={activeTab === 'listings'}
             onClick={() => setActiveTab('listings')}
-            className={`min-h-[36px] px-3.5 rounded-lg transition-colors cursor-pointer ${
+          className={`min-h-[44px] px-3.5 rounded-lg transition-colors cursor-pointer ${
               activeTab === 'listings'
                 ? 'bg-neutral-800 text-amber-400'
                 : 'text-neutral-400 hover:text-neutral-200'
@@ -185,8 +208,9 @@ export const OwnerOnboardPage: React.FC = () => {
           </button>
           <button
             type="button"
+            aria-pressed={activeTab === 'earnings'}
             onClick={() => setActiveTab('earnings')}
-            className={`min-h-[36px] px-3.5 rounded-lg transition-colors cursor-pointer ${
+          className={`min-h-[44px] px-3.5 rounded-lg transition-colors cursor-pointer ${
               activeTab === 'earnings'
                 ? 'bg-neutral-800 text-amber-400'
                 : 'text-neutral-400 hover:text-neutral-200'
@@ -207,7 +231,7 @@ export const OwnerOnboardPage: React.FC = () => {
                 Vehicle Listing Submitted Successfully!
               </h2>
               <p className="text-xs text-neutral-300 max-w-md mx-auto mb-6">
-                Your listing is pending student coordinator physical review. Bring your two-wheeler to {PLATFORM_CONFIG.hubs[0]?.name} for physical check and hub activation.
+                Your listing request is awaiting review. Its current status and any requested changes will appear under My Listings.
               </p>
               <Button onClick={() => setActiveTab('listings')} variant="primary">
                 View Listing Status
@@ -227,14 +251,16 @@ export const OwnerOnboardPage: React.FC = () => {
                     required
                     placeholder="e.g. Honda, Ather, Yamaha"
                     value={brand}
-                    onChange={(e) => setBrand(e.target.value)}
+                    onChange={(e) => { setBrand(e.target.value); setFormFieldErrors((prev) => ({ ...prev, brand: '' })); }}
+                    error={formFieldErrors.brand}
                   />
                   <Input
                     label="Model Name"
                     required
                     placeholder="e.g. Activa 6G, 450X, MT-15"
                     value={model}
-                    onChange={(e) => setModel(e.target.value)}
+                    onChange={(e) => { setModel(e.target.value); setFormFieldErrors((prev) => ({ ...prev, model: '' })); }}
+                    error={formFieldErrors.model}
                   />
                 </div>
 
@@ -243,16 +269,18 @@ export const OwnerOnboardPage: React.FC = () => {
                     label="Model Year"
                     type="number"
                     min={2014}
-                    max={2026}
+                    max={2027}
                     required
                     value={year}
-                    onChange={(e) => setYear(Number(e.target.value))}
+                    onChange={(e) => { setYear(Number(e.target.value)); setFormFieldErrors((prev) => ({ ...prev, year: '' })); }}
+                    error={formFieldErrors.year}
                   />
 
                   <Select
                     label="Category"
                     value={bikeType}
-                    onChange={(e) => setBikeType(e.target.value as any)}
+                    onChange={(e) => { setBikeType(e.target.value as BikeType); setFormFieldErrors((prev) => ({ ...prev, bikeType: '' })); }}
+                    error={formFieldErrors.bikeType}
                     options={[
                       { value: 'scooter', label: 'Scooter' },
                       { value: 'commuter', label: 'Commuter' },
@@ -265,10 +293,22 @@ export const OwnerOnboardPage: React.FC = () => {
                   <Select
                     label="Fuel Type"
                     value={fuelType}
-                    onChange={(e) => setFuelType(e.target.value as any)}
+                    onChange={(e) => { setFuelType(e.target.value as FuelType); setFormFieldErrors((prev) => ({ ...prev, fuelType: '' })); }}
+                    error={formFieldErrors.fuelType}
                     options={[
                       { value: 'petrol', label: 'Petrol' },
                       { value: 'electric', label: 'Electric (EV)' },
+                    ]}
+                  />
+
+                  <Select
+                    label="Transmission"
+                    value={transmission}
+                    onChange={(e) => { setTransmission(e.target.value as Transmission); setFormFieldErrors((prev) => ({ ...prev, transmission: '' })); }}
+                    error={formFieldErrors.transmission}
+                    options={[
+                      { value: 'automatic', label: 'Automatic' },
+                      { value: 'manual', label: 'Manual' },
                     ]}
                   />
                 </div>
@@ -279,14 +319,16 @@ export const OwnerOnboardPage: React.FC = () => {
                     required
                     placeholder="e.g. TS08EP4921"
                     value={registrationNumber}
-                    onChange={(e) => setRegistrationNumber(e.target.value.toUpperCase())}
+                    onChange={(e) => { setRegistrationNumber(e.target.value.toUpperCase()); setFormFieldErrors((prev) => ({ ...prev, registrationNumber: '' })); }}
+                    error={formFieldErrors.registrationNumber}
                     helperText="Masked on public cards (e.g. TS08-****) for privacy"
                   />
 
                   <Select
                     label="Preferred Campus Hub"
                     value={preferredHubId}
-                    onChange={(e) => setPreferredHubId(e.target.value)}
+                    onChange={(e) => { setPreferredHubId(e.target.value); setFormFieldErrors((prev) => ({ ...prev, preferredHubId: '' })); }}
+                    error={formFieldErrors.preferredHubId}
                     options={PLATFORM_CONFIG.hubs.map((h) => ({
                       value: h.id,
                       label: `${h.name} (${h.code})`,
@@ -309,7 +351,8 @@ export const OwnerOnboardPage: React.FC = () => {
                     max={250}
                     required
                     value={hourlyRateInr}
-                    onChange={(e) => setHourlyRateInr(Number(e.target.value))}
+                    onChange={(e) => { setHourlyRateInr(Number(e.target.value)); setFormFieldErrors((prev) => ({ ...prev, hourlyRateInr: '' })); }}
+                    error={formFieldErrors.hourlyRateInr}
                     helperText="Recommended: ₹40 - ₹80/hr"
                   />
 
@@ -320,18 +363,20 @@ export const OwnerOnboardPage: React.FC = () => {
                     max={2000}
                     required
                     value={dailyRateInr}
-                    onChange={(e) => setDailyRateInr(Number(e.target.value))}
+                    onChange={(e) => { setDailyRateInr(Number(e.target.value)); setFormFieldErrors((prev) => ({ ...prev, dailyRateInr: '' })); }}
+                    error={formFieldErrors.dailyRateInr}
                     helperText="Max daily rate cap for full-day rentals"
                   />
                 </div>
 
-                <Input
-                  label="Payout UPI ID (Receives 92% of earnings)"
+                  <Input
+                    label="Payout UPI ID"
                   required
                   placeholder="student@okhdfcbank"
                   value={payoutUpiId}
-                  onChange={(e) => setPayoutUpiId(e.target.value)}
-                  helperText="Instant payouts direct to your bank upon rental completion"
+                  onChange={(e) => { setPayoutUpiId(e.target.value); setFormFieldErrors((prev) => ({ ...prev, payoutUpiId: '' })); }}
+                  error={formFieldErrors.payoutUpiId}
+                    helperText="Payout timing and terms are pending legal review."
                 />
               </Card>
 
@@ -349,18 +394,19 @@ export const OwnerOnboardPage: React.FC = () => {
                     </label>
                     <div className="h-32 border-2 border-dashed border-neutral-700 rounded-xl flex items-center justify-center relative bg-neutral-950 p-2 overflow-hidden">
                       {bikePhotoPreview ? (
-                        <img src={bikePhotoPreview} alt="Bike" className="w-full h-full object-cover" />
+                        <img src={bikePhotoPreview} alt="Vehicle photo preview" width={320} height={180} className="w-full h-full object-cover" />
                       ) : (
                         <span className="text-[11px] text-neutral-500 text-center">Click to upload photo</span>
                       )}
                       <input
                         type="file"
-                        accept="image/*"
-                        onChange={(e) => handleFileUpload(e, setBikePhotoPreview)}
+                        accept="image/jpeg,image/png,image/webp"
+                        onChange={(e) => handleFileUpload(e, setBikePhotoPreview, 'Vehicle photo', 'bikePhoto')}
                         className="absolute inset-0 opacity-0 cursor-pointer"
                         aria-label="Upload vehicle photo"
                       />
                     </div>
+                    {uploadErrors.bikePhoto && <p role="alert" aria-live="polite" className="text-xs text-rose-400">{uploadErrors.bikePhoto}</p>}
                   </div>
 
                   {/* RC Photo */}
@@ -370,18 +416,19 @@ export const OwnerOnboardPage: React.FC = () => {
                     </label>
                     <div className="h-32 border-2 border-dashed border-neutral-700 rounded-xl flex items-center justify-center relative bg-neutral-950 p-2 overflow-hidden">
                       {rcPreview ? (
-                        <img src={rcPreview} alt="RC" className="w-full h-full object-cover" />
+                        <img src={rcPreview} alt="Registration document preview" width={320} height={180} className="w-full h-full object-cover" />
                       ) : (
                         <span className="text-[11px] text-neutral-500 text-center">Upload RC image</span>
                       )}
                       <input
                         type="file"
-                        accept="image/*"
-                        onChange={(e) => handleFileUpload(e, setRcPreview)}
+                        accept="image/jpeg,image/png,image/webp"
+                        onChange={(e) => handleFileUpload(e, setRcPreview, 'Registration document', 'rc')}
                         className="absolute inset-0 opacity-0 cursor-pointer"
                         aria-label="Upload RC photo"
                       />
                     </div>
+                    {uploadErrors.rc && <p role="alert" aria-live="polite" className="text-xs text-rose-400">{uploadErrors.rc}</p>}
                   </div>
 
                   {/* Insurance Photo */}
@@ -391,18 +438,19 @@ export const OwnerOnboardPage: React.FC = () => {
                     </label>
                     <div className="h-32 border-2 border-dashed border-neutral-700 rounded-xl flex items-center justify-center relative bg-neutral-950 p-2 overflow-hidden">
                       {insurancePreview ? (
-                        <img src={insurancePreview} alt="Insurance" className="w-full h-full object-cover" />
+                        <img src={insurancePreview} alt="Insurance document preview" width={320} height={180} className="w-full h-full object-cover" />
                       ) : (
                         <span className="text-[11px] text-neutral-500 text-center">Upload Insurance</span>
                       )}
                       <input
                         type="file"
-                        accept="image/*"
-                        onChange={(e) => handleFileUpload(e, setInsurancePreview)}
+                        accept="image/jpeg,image/png,image/webp"
+                        onChange={(e) => handleFileUpload(e, setInsurancePreview, 'Insurance document', 'insurance')}
                         className="absolute inset-0 opacity-0 cursor-pointer"
                         aria-label="Upload Insurance document"
                       />
                     </div>
+                    {uploadErrors.insurance && <p role="alert" aria-live="polite" className="text-xs text-rose-400">{uploadErrors.insurance}</p>}
                   </div>
                 </div>
               </Card>
@@ -414,7 +462,7 @@ export const OwnerOnboardPage: React.FC = () => {
                   <span>Mandatory Owner Compliance Notice</span>
                 </div>
                 <p className="leading-relaxed text-neutral-300">
-                  By listing your vehicle on Riders Path, you attest under student honor code that the two-wheeler is legally registered in India, holds current third-party or comprehensive insurance, has valid roadworthiness, and that you have full authorization to permit peer student rentals.
+                  Before submitting, confirm the vehicle has valid registration, current insurance, required permits, and that you are authorized to offer it for rent.
                 </p>
 
                 <label className="flex items-start gap-2.5 pt-2 text-neutral-100 font-semibold cursor-pointer select-none">
@@ -425,13 +473,14 @@ export const OwnerOnboardPage: React.FC = () => {
                     className="w-4 h-4 rounded text-amber-500 bg-neutral-800 border-neutral-700 focus:ring-amber-500 mt-0.5"
                   />
                   <span>
-                    I confirm vehicle ownership, active insurance, and agree to present the vehicle for physical coordinator inspection at the hub.
+                    I confirm the vehicle has valid registration and insurance, required permits are in place, and I am authorized to offer it for rent.
                   </span>
                 </label>
+                {formFieldErrors.ownerResponsibilityAgreed && <p role="alert" aria-live="polite" className="text-xs text-rose-300">{formFieldErrors.ownerResponsibilityAgreed}</p>}
               </div>
 
               {formError && (
-                <p role="alert" className="text-xs font-medium text-rose-400 bg-rose-950/30 p-3 rounded-xl border border-rose-900/50">
+                <p role="alert" aria-live="polite" className="text-xs font-medium text-rose-400 bg-rose-950/30 p-3 rounded-xl border border-rose-900/50">
                   {formError}
                 </p>
               )}
@@ -439,12 +488,13 @@ export const OwnerOnboardPage: React.FC = () => {
               <Button
                 type="submit"
                 isLoading={isSubmitting}
+                disabled={isSubmitting}
                 size="lg"
                 variant="primary"
                 className="w-full font-bold"
                 rightIcon={<ArrowRight className="w-4 h-4" />}
               >
-                Submit Vehicle for Coordinator Approval
+                Submit Vehicle for Team Review
               </Button>
             </form>
           )}
@@ -454,7 +504,14 @@ export const OwnerOnboardPage: React.FC = () => {
       {/* TAB 2: My Listings */}
       {activeTab === 'listings' && (
         <div className="flex flex-col gap-4">
-          {listings.length === 0 ? (
+          {isLoadingListings ? (
+            <div className="flex flex-col gap-3" role="status" aria-label="Loading listings">
+              <Skeleton height={112} rounded="xl" />
+              <Skeleton height={112} rounded="xl" />
+            </div>
+          ) : listingsError ? (
+            <ErrorState message={listingsError} onRetry={fetchListings} />
+          ) : listings.length === 0 ? (
             <Card className="text-center p-8">
               <p className="text-xs text-neutral-400 mb-4">You have not submitted any vehicles yet.</p>
               <Button size="sm" onClick={() => setActiveTab('onboard')}>
@@ -474,22 +531,14 @@ export const OwnerOnboardPage: React.FC = () => {
                     </p>
                   </div>
 
-                  <Badge
-                    variant={
-                      item.status === 'APPROVED'
-                        ? 'success'
-                        : item.status === 'PENDING_APPROVAL'
-                        ? 'warning'
-                        : 'danger'
-                    }
-                  >
-                    {item.status}
+                  <Badge variant={item.status === 'APPROVED' ? 'success' : item.status === 'PENDING_APPROVAL' ? 'warning' : 'danger'}>
+                    {item.status === 'PENDING_APPROVAL' ? 'Pending review' : item.status === 'CHANGES_REQUESTED' ? 'Changes requested' : item.status === 'APPROVED' ? 'Approved' : 'Not approved'}
                   </Badge>
                 </div>
 
                 {item.adminNotes && (
                   <div className="p-3 rounded-xl bg-neutral-950 border border-neutral-800 text-xs text-neutral-300">
-                    <span className="font-semibold text-neutral-200">Coordinator Notes: </span>
+                    <span className="font-semibold text-neutral-200">Review team notes: </span>
                     {item.adminNotes}
                   </div>
                 )}
@@ -502,9 +551,17 @@ export const OwnerOnboardPage: React.FC = () => {
       {/* TAB 3: Earnings Desk */}
       {activeTab === 'earnings' && (
         <div className="flex flex-col gap-6">
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+          {isLoadingListings ? (
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4" role="status" aria-label="Loading earnings">
+              <Skeleton height={108} rounded="xl" /><Skeleton height={108} rounded="xl" /><Skeleton height={108} rounded="xl" />
+            </div>
+          ) : listingsError ? (
+            <ErrorState message={listingsError} onRetry={fetchListings} />
+          ) : listings.length === 0 ? (
+            <Card className="text-center p-8"><p className="text-sm text-neutral-300">Earnings will appear after your listing has bookings.</p></Card>
+          ) : <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
             <Card className="p-5">
-              <span className="text-xs text-neutral-400 block mb-1">Total Net Earnings (92%)</span>
+              <span className="text-xs text-neutral-400 block mb-1">Total Net Earnings</span>
               <span className="text-2xl font-bold font-mono text-emerald-400">
                 ₹{listings.reduce((acc, l) => acc + l.earnings.netEarningsInr, 0)}
               </span>
@@ -521,7 +578,7 @@ export const OwnerOnboardPage: React.FC = () => {
                 ₹{listings.reduce((acc, l) => acc + l.earnings.payoutsPendingInr, 0)}
               </span>
             </Card>
-          </div>
+          </div>}
         </div>
       )}
     </div>

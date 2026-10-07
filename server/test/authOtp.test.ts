@@ -386,7 +386,7 @@ describe('Passwordless Email-OTP Authentication & Security Tests', () => {
         .post('/api/auth/otp/verify')
         .send({ email: targetEmail, code });
       expect(res.status).toBe(400);
-      expect(res.body.code).toBe('INVALID_OTP');
+      expect(res.body.code).toBe('OTP_EXPIRED');
     });
   });
 

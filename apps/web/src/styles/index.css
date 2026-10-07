@@ -4,6 +4,22 @@
   --font-heading: 'Syne', -apple-system, BlinkMacSystemFont, sans-serif;
   --font-sans: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
   --font-mono: 'JetBrains Mono', monospace;
+  --text-xs: 0.75rem;
+  --text-xs--line-height: 1rem;
+  --text-sm: 0.875rem;
+  --text-sm--line-height: 1.25rem;
+  --text-base: 1rem;
+  --text-base--line-height: 1.5rem;
+  --text-lg: 1.125rem;
+  --text-lg--line-height: 1.75rem;
+  --text-xl: 1.25rem;
+  --text-xl--line-height: 1.75rem;
+  --text-2xl: 1.5rem;
+  --text-2xl--line-height: 2rem;
+  --text-display: 3.5rem;
+  --text-display--line-height: 1.05;
+  --spacing-18: 4.5rem;
+  --spacing-22: 5.5rem;
 }
 
 :root {
@@ -27,6 +43,7 @@
   --radius-md: 10px;
   --radius-lg: 14px;
   --radius-xl: 20px;
+  --space-page-gutter: 1rem;
 }
 
 /* Tailwind neutral and status shades are mapped for the existing component

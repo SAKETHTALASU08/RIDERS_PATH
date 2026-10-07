@@ -33,7 +33,7 @@ export const Footer: React.FC = () => {
             </span>
             {PLATFORM_CONFIG.hubs.map((hub) => (
               <span key={hub.id} className="text-neutral-400 hover:text-neutral-200 transition-colors">
-                {hub.name}
+                {hub.name} · {hub.operatingHours}
               </span>
             ))}
           </div>
@@ -77,7 +77,7 @@ export const Footer: React.FC = () => {
               List Your Two-Wheeler
             </Link>
             <span className="text-[11px] text-neutral-400 mt-2">
-              Physical Hub Hours: 07:30 AM – 10:00 PM Daily
+              Hours vary by pickup hub; see the selected hub details.
             </span>
           </div>
         </div>
@@ -85,7 +85,7 @@ export const Footer: React.FC = () => {
         {/* Regulatory disclaimer */}
         <div className="pt-8 border-t border-neutral-900/80 flex flex-col md:flex-row items-center justify-between gap-4 text-[11px] text-neutral-400">
           <p className="max-w-2xl leading-relaxed text-center md:text-left">
-            Notice: Riders Path functions exclusively as a campus student community facilitator. All riders must hold a valid Indian Driving Licence (Two-Wheeler) and comply with the Motor Vehicles Act, 1988 and university campus safety directives. ISI-marked helmets are compulsory.
+            <span className="font-semibold text-amber-400">[LEGAL TEXT TO BE REVIEWED]</span>
           </p>
           <p>© {new Date().getFullYear()} Riders Path ICFAI Hyderabad. All rights reserved.</p>
         </div>

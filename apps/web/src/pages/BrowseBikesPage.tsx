@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import {
   Search,
@@ -9,9 +9,6 @@ import {
   Zap,
   Star,
   ArrowRight,
-  ShieldCheck,
-  CheckCircle2,
-  RefreshCw,
 } from 'lucide-react';
 import { PublicBikeDto } from '@riders-path/shared';
 import { apiClient } from '../api/client';
@@ -23,6 +20,7 @@ import { Badge } from '../components/ui/Badge';
 import { Skeleton } from '../components/ui/Skeleton';
 import { EmptyState } from '../components/ui/EmptyState';
 import { ErrorState } from '../components/ui/ErrorState';
+import { DateTimePicker } from '../components/ui/DateTimePicker';
 import { PLATFORM_CONFIG } from '@riders-path/shared';
 
 export const BrowseBikesPage: React.FC = () => {
@@ -34,31 +32,57 @@ export const BrowseBikesPage: React.FC = () => {
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedType, setSelectedType] = useState('all');
   const [selectedFuel, setSelectedFuel] = useState('all');
+  const [selectedTransmission, setSelectedTransmission] = useState('all');
   const [selectedHub, setSelectedHub] = useState('all');
   const [sortBy, setSortBy] = useState<'popular' | 'price_asc' | 'price_desc' | 'rating'>('popular');
-  const [instantOnly, setInstantOnly] = useState(false);
-  const [maxPrice, setMaxPrice] = useState<number>(200);
+  const [maxPrice, setMaxPrice] = useState('');
+  const [filterStart, setFilterStart] = useState('');
+  const [filterEnd, setFilterEnd] = useState('');
+  const [availabilityFilterMessage, setAvailabilityFilterMessage] = useState('');
+  const requestId = useRef(0);
+
+  const filterDateError = filterStart && filterEnd && new Date(filterEnd) <= new Date(filterStart)
+    ? 'Return time must be later than pickup time.'
+    : '';
 
   const fetchBikes = useCallback(async () => {
+    const thisRequest = ++requestId.current;
     setIsLoading(true);
     setError(null);
+    setAvailabilityFilterMessage('');
+    if (filterDateError) {
+      setBikes([]);
+      setIsLoading(false);
+      return;
+    }
     try {
-      const data = await apiClient.getBikes({
+      let data = await apiClient.getBikes({
         query: searchQuery,
         bikeType: selectedType,
         fuelType: selectedFuel,
+        transmission: selectedTransmission,
         hubId: selectedHub,
-        sortBy: sortBy,
-        instantOnly: instantOnly,
-        maxHourlyRate: maxPrice,
+        sortBy,
+        maxHourlyRate: maxPrice ? Number(maxPrice) : undefined,
       });
+      if (filterStart && filterEnd) {
+        const availability = await Promise.all(data.map((bike) =>
+          apiClient.checkAvailability(bike.id, filterStart, filterEnd)
+        ));
+        data = data.filter((_bike, index) => availability[index].available);
+        setAvailabilityFilterMessage(`Availability checked for ${data.length} matching vehicle${data.length === 1 ? '' : 's'}.`);
+      } else if (filterStart || filterEnd) {
+        setAvailabilityFilterMessage('Choose both pickup and return times to filter by availability.');
+      }
+      if (thisRequest !== requestId.current) return;
       setBikes(data);
     } catch (err: any) {
+      if (thisRequest !== requestId.current) return;
       setError(err.message || 'Unable to load campus bike catalog. Please try again.');
     } finally {
-      setIsLoading(false);
+      if (thisRequest === requestId.current) setIsLoading(false);
     }
-  }, [searchQuery, selectedType, selectedFuel, selectedHub, sortBy, instantOnly, maxPrice]);
+  }, [searchQuery, selectedType, selectedFuel, selectedTransmission, selectedHub, sortBy, maxPrice, filterStart, filterEnd, filterDateError]);
 
   useEffect(() => {
     fetchBikes();
@@ -68,10 +92,12 @@ export const BrowseBikesPage: React.FC = () => {
     setSearchQuery('');
     setSelectedType('all');
     setSelectedFuel('all');
+    setSelectedTransmission('all');
     setSelectedHub('all');
     setSortBy('popular');
-    setInstantOnly(false);
-    setMaxPrice(200);
+    setMaxPrice('');
+    setFilterStart('');
+    setFilterEnd('');
   };
 
   return (
@@ -87,25 +113,14 @@ export const BrowseBikesPage: React.FC = () => {
             Available Two-Wheelers
           </h1>
           <p className="text-xs sm:text-sm text-neutral-400 mt-1">
-            Inspected student-owned rides available across {PLATFORM_CONFIG.hubs.length} campus hubs.
+            Student-listed rides available across {PLATFORM_CONFIG.hubs.length} campus hubs.
           </p>
         </div>
 
-        {/* Instant toggle */}
-        <label className="flex items-center gap-2.5 text-xs text-neutral-300 font-medium cursor-pointer select-none bg-neutral-900 border border-neutral-800 px-4 py-2.5 rounded-xl self-start md:self-auto">
-          <input
-            type="checkbox"
-            checked={instantOnly}
-            onChange={(e) => setInstantOnly(e.target.checked)}
-            className="w-4 h-4 rounded text-amber-500 bg-neutral-800 border-neutral-700 focus:ring-amber-500 cursor-pointer"
-          />
-          <Zap className="w-4 h-4 text-amber-400" />
-          <span>Instant Booking Only</span>
-        </label>
       </div>
 
       {/* Filter and Search Bar */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 p-4 rounded-2xl bg-neutral-900/60 border border-neutral-800 mb-8">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 p-4 rounded-2xl bg-neutral-900/60 border border-neutral-800 mb-3">
         {/* Search */}
         <div className="lg:col-span-2">
           <Input
@@ -128,6 +143,41 @@ export const BrowseBikesPage: React.FC = () => {
             { value: 'all', label: 'All Campus Hubs' },
             ...PLATFORM_CONFIG.hubs.map((h) => ({ value: h.id, label: h.name })),
           ]}
+        />
+
+        <Select
+          id="filter-fuel"
+          label="Fuel"
+          value={selectedFuel}
+          onChange={(e) => setSelectedFuel(e.target.value)}
+          options={[
+            { value: 'all', label: 'All Fuel Types' },
+            { value: 'petrol', label: 'Petrol' },
+            { value: 'electric', label: 'Electric' },
+          ]}
+        />
+
+        <Select
+          id="filter-transmission"
+          label="Transmission"
+          value={selectedTransmission}
+          onChange={(e) => setSelectedTransmission(e.target.value)}
+          options={[
+            { value: 'all', label: 'Any Transmission' },
+            { value: 'automatic', label: 'Automatic' },
+            { value: 'manual', label: 'Manual' },
+          ]}
+        />
+
+        <Input
+          id="filter-max-price"
+          label="Max hourly price (₹)"
+          type="number"
+          min={0}
+          inputMode="numeric"
+          placeholder="Any price"
+          value={maxPrice}
+          onChange={(e) => setMaxPrice(e.target.value)}
         />
 
         {/* Bike Type */}
@@ -159,6 +209,28 @@ export const BrowseBikesPage: React.FC = () => {
             { value: 'rating', label: 'Top Rated' },
           ]}
         />
+      </div>
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 p-4 rounded-2xl bg-neutral-900/60 border border-neutral-800 mb-8">
+        <DateTimePicker
+          id="browse-start"
+          label="Pickup date and time"
+          value={filterStart}
+          onChange={setFilterStart}
+          min={new Date().toISOString()}
+          error={filterDateError || undefined}
+        />
+        <DateTimePicker
+          id="browse-end"
+          label="Return date and time"
+          value={filterEnd}
+          onChange={setFilterEnd}
+          min={filterStart || new Date().toISOString()}
+          error={filterDateError || undefined}
+        />
+        {availabilityFilterMessage && !filterDateError && (
+          <p role="status" aria-live="polite" className="sm:col-span-2 text-xs text-neutral-400">{availabilityFilterMessage}</p>
+        )}
       </div>
 
       {/* Loading Skeletons */}
@@ -207,7 +279,10 @@ export const BrowseBikesPage: React.FC = () => {
                 <img
                   src={bike.images[0]}
                   alt={`${bike.brand} ${bike.model}`}
+                  width={800}
+                  height={450}
                   loading="lazy"
+                  decoding="async"
                   className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
                 />
                 <div className="absolute top-3 left-3 flex gap-1.5 flex-wrap">
@@ -275,10 +350,11 @@ export const BrowseBikesPage: React.FC = () => {
                     </span>
                   </div>
 
-                  <Link to={`/bikes/${bike.id}`}>
-                    <Button size="sm" variant="primary" rightIcon={<ArrowRight className="w-3.5 h-3.5" />}>
-                      Details & Rent
-                    </Button>
+                  <Link
+                    to={`/bikes/${bike.id}`}
+                    className="inline-flex min-h-[44px] items-center gap-2 rounded-xl bg-amber-500 px-4 py-2 text-sm font-bold text-slate-950 hover:bg-amber-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500"
+                  >
+                    Details & Rent <ArrowRight className="w-3.5 h-3.5" aria-hidden="true" />
                   </Link>
                 </div>
               </div>

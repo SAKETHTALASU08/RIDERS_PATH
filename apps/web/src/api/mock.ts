@@ -26,7 +26,6 @@ export interface BikeFilterParams {
   transmission?: string;
   hubId?: string;
   maxHourlyRate?: number;
-  instantOnly?: boolean;
   sortBy?: 'price_asc' | 'price_desc' | 'rating' | 'popular';
 }
 
@@ -46,7 +45,13 @@ class MockApiService {
   async getConfig() {
     await this.delay(50);
     return {
-      ...PLATFORM_CONFIG,
+      appName: PLATFORM_CONFIG.appName,
+      campusName: PLATFORM_CONFIG.campusName,
+      termsVersion: PLATFORM_CONFIG.termsVersion,
+      privacyVersion: PLATFORM_CONFIG.privacyVersion,
+      depositPolicy: PLATFORM_CONFIG.depositPolicy,
+      hubs: PLATFORM_CONFIG.hubs,
+      safetyRules: PLATFORM_CONFIG.safetyRules,
       allowedEmailDomain: null,
       allowedEmailDomains: [],
       enrollmentFormatRegex: DEFAULT_ENROLLMENT_REGEX,
@@ -85,13 +90,10 @@ class MockApiService {
       list = list.filter((b) => b.hubId === params.hubId);
     }
 
-    if (params.maxHourlyRate && params.maxHourlyRate > 0) {
+    if (params.maxHourlyRate !== undefined) {
       list = list.filter((b) => b.hourlyRateInr <= params.maxHourlyRate!);
     }
 
-    if (params.instantOnly) {
-      list = list.filter((b) => b.isInstantBooking);
-    }
 
     if (params.sortBy) {
       switch (params.sortBy) {
@@ -371,7 +373,7 @@ class MockApiService {
       bikeId: bike.id,
       bike,
       userId: this.currentUser?.id || 'usr_guest',
-      renterName: this.currentUser?.name || 'Verified ICFAI Student',
+      renterName: this.currentUser?.name || 'ICFAI Student',
       startTime: data.startTime,
       endTime: data.endTime,
       pickupHubId: data.pickupHubId,

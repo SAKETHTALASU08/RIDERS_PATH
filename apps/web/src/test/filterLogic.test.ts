@@ -34,6 +34,15 @@ describe('Fleet Catalog Filtering & Sorting Logic', () => {
     });
   });
 
+  it('filters bikes by transmission and maximum hourly price', async () => {
+    const results = await mockApi.getBikes({ transmission: 'automatic', maxHourlyRate: 50 });
+    expect(results.length).toBeGreaterThan(0);
+    results.forEach((bike) => {
+      expect(bike.transmission).toBe('automatic');
+      expect(bike.hourlyRateInr).toBeLessThanOrEqual(50);
+    });
+  });
+
   it('sorts bikes accurately by price ascending and descending', async () => {
     const priceAsc = await mockApi.getBikes({ sortBy: 'price_asc' });
     for (let i = 0; i < priceAsc.length - 1; i++) {

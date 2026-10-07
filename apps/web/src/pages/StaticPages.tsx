@@ -88,10 +88,8 @@ export const NotFoundPage: React.FC = () => (
     <p className="text-xs text-neutral-400 max-w-sm mb-6">
       The requested page or vehicle listing does not exist in the Riders Path network.
     </p>
-    <Link to="/">
-      <Button variant="primary" leftIcon={<ArrowLeft className="w-4 h-4" />}>
-        Return to Campus Home
-      </Button>
+    <Link to="/" className="inline-flex min-h-[44px] items-center gap-2 rounded-xl bg-amber-500 px-5 py-2.5 text-sm font-semibold text-slate-950 hover:bg-amber-400 focus-visible:ring-2 focus-visible:ring-amber-500">
+      <ArrowLeft className="w-4 h-4" aria-hidden="true" /> Return to Campus Home
     </Link>
   </div>
 );

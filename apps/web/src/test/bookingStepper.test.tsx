@@ -1,6 +1,6 @@
 import React from 'react';
 import { describe, it, expect } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import { BookingFlowPage } from '../pages/BookingFlowPage';
@@ -8,6 +8,32 @@ import { AuthProvider } from '../context/AuthContext';
 import { ToastProvider } from '../components/ui/Toast';
 
 describe('Booking Stepper Flow & Validation', () => {
+  it('shows field-level validation and keeps the selected dates when the range is invalid', async () => {
+    const user = userEvent.setup();
+
+    render(
+      <MemoryRouter initialEntries={['/book/bike-ather-450x']}>
+        <ToastProvider>
+          <AuthProvider>
+            <Routes>
+              <Route path="/book/:id" element={<BookingFlowPage />} />
+            </Routes>
+          </AuthProvider>
+        </ToastProvider>
+      </MemoryRouter>
+    );
+
+    await screen.findByText(/Ather 450X Gen 3/i);
+    const returnInput = screen.getByLabelText(/return date & time/i) as HTMLInputElement;
+    fireEvent.change(returnInput, { target: { value: '2020-01-01T10:00' } });
+    await user.click(screen.getByRole('button', { name: /compute server pricing/i }));
+
+    expect(returnInput).toHaveAttribute('aria-invalid', 'true');
+    expect(returnInput).toHaveValue('2020-01-01T10:00');
+    expect(screen.getByText('Return time must be later than pickup time.')).toBeInTheDocument();
+    expect(screen.getByText('Review the highlighted booking details.')).toBeInTheDocument();
+  });
+
   it('renders booking stepper and advances to server pricing calculation', async () => {
     const user = userEvent.setup();
 

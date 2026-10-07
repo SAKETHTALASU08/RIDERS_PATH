@@ -105,25 +105,12 @@ export const LandingPage: React.FC = () => {
             </p>
 
             <div className="flex flex-col sm:flex-row items-center gap-3.5 w-full sm:w-auto">
-              <Link to="/browse" className="w-full sm:w-auto">
-                <Button
-                  size="lg"
-                  variant="primary"
-                  className="w-full sm:w-auto text-base"
-                  rightIcon={<ArrowRight className="w-4 h-4" />}
-                >
-                  Browse Campus Fleet
-                </Button>
+              <Link to="/browse" className="inline-flex min-h-[52px] w-full sm:w-auto items-center justify-center gap-2 rounded-xl bg-amber-500 px-6 py-3.5 text-base font-semibold text-slate-950 hover:bg-amber-400 focus-visible:ring-2 focus-visible:ring-amber-500">
+                Browse Campus Fleet <ArrowRight className="w-4 h-4" aria-hidden="true" />
               </Link>
 
-              <Link to="/owner" className="w-full sm:w-auto">
-                <Button
-                  size="lg"
-                  variant="outline"
-                  className="w-full sm:w-auto text-base"
-                >
-                  List Your Bike
-                </Button>
+              <Link to="/owner" className="inline-flex min-h-[52px] w-full sm:w-auto items-center justify-center rounded-xl border border-neutral-700 bg-transparent px-6 py-3.5 text-base font-medium text-neutral-200 hover:border-neutral-500 hover:bg-neutral-900 focus-visible:ring-2 focus-visible:ring-amber-500">
+                List Your Bike
               </Link>
             </div>
 
@@ -156,7 +143,7 @@ export const LandingPage: React.FC = () => {
             How Riders Path Works
           </h2>
           <p className="text-xs sm:text-sm text-neutral-400 mt-2">
-            Built strictly around campus student routines and physical coordinator handovers.
+            Designed around student routines and pickup at campus hubs.
           </p>
         </div>
 

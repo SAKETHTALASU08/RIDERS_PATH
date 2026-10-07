@@ -7,6 +7,7 @@ import { useAuth } from '../context/AuthContext';
 interface SignInLocationState {
   backgroundLocation?: { pathname: string; search?: string; hash?: string };
   returnTo?: string;
+  fallbackTo?: string;
 }
 
 export const SignInPage: React.FC = () => {
@@ -16,6 +17,7 @@ export const SignInPage: React.FC = () => {
   const [opened, setOpened] = useState(false);
   const state = location.state as SignInLocationState | null;
   const returnTo = state?.returnTo || '/browse';
+  const fallbackTo = state?.fallbackTo || '/browse';
 
   useEffect(() => {
     if (isLoading) return;
@@ -29,8 +31,8 @@ export const SignInPage: React.FC = () => {
       openAuthModal();
       return;
     }
-    if (!isAuthModalOpen) navigate(returnTo, { replace: true, state: null });
-  }, [closeAuthModal, isAuthModalOpen, isLoading, navigate, openAuthModal, opened, returnTo, user]);
+    if (!isAuthModalOpen) navigate(fallbackTo, { replace: true, state: null });
+  }, [closeAuthModal, fallbackTo, isAuthModalOpen, isLoading, navigate, openAuthModal, opened, returnTo, user]);
 
   return (
     <section className="w-full max-w-xl mx-auto px-4 py-16 text-center">
