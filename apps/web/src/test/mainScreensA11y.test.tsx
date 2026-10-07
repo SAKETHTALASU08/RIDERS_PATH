@@ -6,6 +6,7 @@ import axe from 'axe-core';
 import { LandingPage } from '../pages/LandingPage';
 import { BrowseBikesPage } from '../pages/BrowseBikesPage';
 import { BookingFlowPage } from '../pages/BookingFlowPage';
+import { BikeDetailPage } from '../pages/BikeDetailPage';
 import { OwnerOnboardPage } from '../pages/OwnerOnboardPage';
 import { ToastProvider } from '../components/ui/Toast';
 import { AuthProvider } from '../context/AuthContext';
@@ -44,6 +45,16 @@ describe('Main screen accessibility', () => {
     await expectAccessible(container);
   });
 
+  it('passes axe checks on the loaded bike detail screen', async () => {
+    const detail = render(
+      <MemoryRouter initialEntries={['/bikes/bike-ather-450x']}>
+        <ToastProvider><AuthProvider><main><Routes><Route path="/bikes/:id" element={<BikeDetailPage/>}/></Routes></main></AuthProvider></ToastProvider>
+      </MemoryRouter>
+    );
+    expect(await screen.findByRole('heading', { name: /Ather 450X Gen 3/i })).toBeInTheDocument();
+    await expectAccessible(detail.container);
+  });
+
   it('passes axe checks on booking and owner forms', async () => {
     const booking = render(
       <MemoryRouter initialEntries={['/book/bike-ather-450x']}>
@@ -56,7 +67,7 @@ describe('Main screen accessibility', () => {
         </ToastProvider>
       </MemoryRouter>
     );
-    expect(await screen.findByText(/choose rental duration & pickup hub/i)).toBeInTheDocument();
+    expect(await screen.findByText(/choose dates and pickup hub/i)).toBeInTheDocument();
     await expectAccessible(booking.container);
 
     cleanup();

@@ -93,7 +93,10 @@ async function request<T>(
     }
     throw {
       ...errorData,
-      message: errorData.message || errorData.error || 'An unexpected server error occurred',
+      // Keep implementation details and proxy error pages out of student-facing UI.
+      message: response.status >= 500
+        ? 'The service is having trouble right now. Please try again shortly.'
+        : errorData.message || errorData.error || 'An unexpected server error occurred',
       status: errorData.status || response.status,
     };
   }
@@ -130,8 +133,8 @@ export const apiClient = {
     );
     if (params.sortBy === 'price_asc') filtered.sort((a, b) => a.hourlyRateInr - b.hourlyRateInr);
     else if (params.sortBy === 'price_desc') filtered.sort((a, b) => b.hourlyRateInr - a.hourlyRateInr);
-    else if (params.sortBy === 'rating') filtered.sort((a, b) => b.rating - a.rating);
-    else filtered.sort((a, b) => b.totalTrips - a.totalTrips);
+    else if (params.sortBy === 'hub') filtered.sort((a, b) => a.hubName.localeCompare(b.hubName));
+    else filtered.sort((a, b) => (b.listedAt || '').localeCompare(a.listedAt || ''));
     return filtered;
   },
 
@@ -139,6 +142,16 @@ export const apiClient = {
     if (USE_MOCK) return mockApi.getBikeById(id);
     const data = await request(`/bikes/${id}`);
     return PublicBikeDtoSchema.parse(data);
+  },
+
+  async getFavoriteBikeIds(): Promise<string[]> {
+    if (USE_MOCK) return mockApi.getFavoriteBikeIds();
+    return request('/favorites');
+  },
+
+  async setFavoriteBike(id: string, saved: boolean): Promise<void> {
+    if (USE_MOCK) return mockApi.setFavoriteBike(id, saved);
+    await request(`/favorites/${encodeURIComponent(id)}`, { method: saved ? 'PUT' : 'DELETE' });
   },
 
   // Live Availability
@@ -231,6 +244,25 @@ export const apiClient = {
   },
 
   // Bookings
+  async createDocumentConsent(version: string): Promise<{ id: string; version: string }> {
+    if (USE_MOCK) return { id: crypto.randomUUID(), version };
+    return request('/documents/consent', { method: 'POST', body: JSON.stringify({ accepted: true, version }) });
+  },
+
+  async uploadDocument(file: File, documentType: 'driving_license' | 'student_id' | 'aadhaar', consentId: string): Promise<{ id: string; documentType: string; reviewStatus: string; byteSize: number }> {
+    if (USE_MOCK) return { id: crypto.randomUUID(), documentType, reviewStatus: 'pending', byteSize: file.size };
+    const form = new FormData();
+    form.set('file', file);
+    form.set('documentType', documentType);
+    form.set('consentId', consentId);
+    return request('/upload/documents', { method: 'POST', body: form });
+  },
+
+  async deleteDocument(documentId: string): Promise<{ success: boolean }> {
+    if (USE_MOCK) return { success: true };
+    return request(`/upload/documents/${encodeURIComponent(documentId)}`, { method: 'DELETE' });
+  },
+
   async createBooking(data: BookingCreate): Promise<BookingResponse> {
     if (USE_MOCK) return mockApi.createBooking(data);
     const response = await request('/bookings', {

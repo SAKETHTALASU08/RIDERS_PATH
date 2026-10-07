@@ -31,8 +31,8 @@ export const LandingPage: React.FC = () => {
     },
     {
       step: '02',
-      title: 'Digital Clearance',
-      desc: 'Confirm your college email, complete your profile, and submit a driving licence and student ID for team review.',
+      title: 'Email and document review',
+      desc: 'Confirm an allowed college email, complete your profile, and submit the requested documents for human review.',
       icon: <ShieldCheck className="w-5 h-5 text-amber-400" />,
     },
     {
@@ -73,7 +73,7 @@ export const LandingPage: React.FC = () => {
     },
     {
       q: 'Which documents should I submit?',
-      a: 'Submit a driving licence and student ID for team review. The booking flow does not request Aadhaar.',
+      a: 'The booking flow lists the required documents and explains their purpose before upload. A campus team member reviews submitted documents.',
     },
     {
       q: 'Can I list my own two-wheeler to earn?',

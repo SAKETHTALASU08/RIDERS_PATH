@@ -26,13 +26,14 @@ export interface BikeFilterParams {
   transmission?: string;
   hubId?: string;
   maxHourlyRate?: number;
-  sortBy?: 'price_asc' | 'price_desc' | 'rating' | 'popular';
+  sortBy?: 'price_asc' | 'price_desc' | 'newest' | 'hub';
 }
 
 class MockApiService {
   private bikes: PublicBikeDto[] = [...INITIAL_MOCK_BIKES];
   private bookings: BookingResponse[] = [...INITIAL_MOCK_BOOKINGS];
   private ownerListings: OwnerListing[] = [...INITIAL_MOCK_OWNER_LISTINGS];
+  private favoriteBikeIds = new Set<string>();
   private currentUser: UserProfile | null = { ...MOCK_USER };
   private pendingOtps: Map<string, { code: string; expiresAt: number }> = new Map();
   private processedIdempotencyKeys: Set<string> = new Set();
@@ -49,6 +50,8 @@ class MockApiService {
       campusName: PLATFORM_CONFIG.campusName,
       termsVersion: PLATFORM_CONFIG.termsVersion,
       privacyVersion: PLATFORM_CONFIG.privacyVersion,
+      requireAadhaarUpload: true,
+      documentConsentVersion: 'documents-demo-v1',
       depositPolicy: PLATFORM_CONFIG.depositPolicy,
       hubs: PLATFORM_CONFIG.hubs,
       safetyRules: PLATFORM_CONFIG.safetyRules,
@@ -103,12 +106,14 @@ class MockApiService {
         case 'price_desc':
           list.sort((a, b) => b.hourlyRateInr - a.hourlyRateInr);
           break;
-        case 'rating':
-          list.sort((a, b) => b.rating - a.rating);
+        case 'newest':
+          list.sort((a, b) => (b.listedAt || '').localeCompare(a.listedAt || ''));
           break;
-        case 'popular':
+        case 'hub':
+          list.sort((a, b) => a.hubName.localeCompare(b.hubName));
+          break;
         default:
-          list.sort((a, b) => b.totalTrips - a.totalTrips);
+          list.sort((a, b) => a.hourlyRateInr - b.hourlyRateInr);
           break;
       }
     }
@@ -128,6 +133,17 @@ class MockApiService {
       } as ApiErrorShape;
     }
     return bike;
+  }
+
+  async getFavoriteBikeIds(): Promise<string[]> {
+    await this.delay(50);
+    return [...this.favoriteBikeIds];
+  }
+
+  async setFavoriteBike(id: string, saved: boolean): Promise<void> {
+    await this.delay(50);
+    if (saved) this.favoriteBikeIds.add(id);
+    else this.favoriteBikeIds.delete(id);
   }
 
   // 4. Live Availability Check
@@ -378,7 +394,7 @@ class MockApiService {
       endTime: data.endTime,
       pickupHubId: data.pickupHubId,
       pickupHubName: hub.name,
-      status: 'CONFIRMED',
+      status: 'PENDING_VERIFICATION',
       pricing,
       handoverCode: `RP-${Math.floor(1000 + Math.random() * 9000)}`,
       qrPassCode: `PASS-RP-2026-${Math.random().toString(36).substring(2, 8).toUpperCase()}`,
@@ -453,8 +469,6 @@ class MockApiService {
       ],
       features: ['ISI Helmet Included', 'Student Owner Inspected'],
       isInstantBooking: false,
-      rating: 5.0,
-      totalTrips: 0,
       conditionNotes: 'Pending ICFAI student coordinator physical inspection',
       registrationMasked: `${data.registrationNumber.slice(0, 4)}-****`,
     };

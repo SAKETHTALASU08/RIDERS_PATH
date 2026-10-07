@@ -1,9 +1,8 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
 import {
   ArrowLeft,
   MapPin,
-  Star,
   Fuel,
   ShieldCheck,
   CheckCircle2,
@@ -16,7 +15,7 @@ import {
   ChevronLeft,
   ChevronRight,
 } from 'lucide-react';
-import { PublicBikeDto, AvailabilityResponse } from '@riders-path/shared';
+import { PublicBikeDto, AvailabilityResponse, PricingBreakdown, PublicConfig } from '@riders-path/shared';
 import { apiClient } from '../api/client';
 import { Button } from '../components/ui/Button';
 import { Card } from '../components/ui/Card';
@@ -24,14 +23,17 @@ import { Badge } from '../components/ui/Badge';
 import { Skeleton } from '../components/ui/Skeleton';
 import { ErrorState } from '../components/ui/ErrorState';
 import { DateTimePicker } from '../components/ui/DateTimePicker';
-import { PLATFORM_CONFIG } from '@riders-path/shared';
+import { Modal } from '../components/ui/Modal';
 
 export const BikeDetailPage: React.FC = () => {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
 
   const [bike, setBike] = useState<PublicBikeDto | null>(null);
+  const [config, setConfig] = useState<PublicConfig | null>(null);
   const [activeImageIndex, setActiveImageIndex] = useState(0);
+  const [galleryOpen, setGalleryOpen] = useState(false);
+  const touchStartX = useRef<number | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -42,6 +44,8 @@ export const BikeDetailPage: React.FC = () => {
   const [checkEnd, setCheckEnd] = useState(defaultEnd);
   const [isCheckingAvailability, setIsCheckingAvailability] = useState(false);
   const [availabilityResult, setAvailabilityResult] = useState<AvailabilityResponse | null>(null);
+  const [priceEstimate, setPriceEstimate] = useState<PricingBreakdown | null>(null);
+  const [estimateError, setEstimateError] = useState<string | null>(null);
   const [availabilityError, setAvailabilityError] = useState<string | null>(null);
   const [calendarMonth, setCalendarMonth] = useState(() => {
     const now = new Date();
@@ -72,9 +76,8 @@ export const BikeDetailPage: React.FC = () => {
     if (!id) return;
     setIsLoading(true);
     setError(null);
-    apiClient
-      .getBikeById(id)
-      .then((data) => setBike(data))
+    Promise.all([apiClient.getBikeById(id), apiClient.getConfig()])
+      .then(([data, runtimeConfig]) => { setBike(data); setConfig(runtimeConfig); })
       .catch((err) => setError(err.message || 'Bike not found in campus catalog'))
       .finally(() => setIsLoading(false));
   }, [id]);
@@ -108,16 +111,38 @@ export const BikeDetailPage: React.FC = () => {
       return;
     }
     setAvailabilityError(null);
+    setPriceEstimate(null);
+    setEstimateError(null);
     setIsCheckingAvailability(true);
     try {
       const res = await apiClient.checkAvailability(id, checkStart, checkEnd);
       setAvailabilityResult(res);
+      if (res.available) {
+        try {
+          setPriceEstimate(await apiClient.computePricing(id, checkStart, checkEnd, 'laptop'));
+        } catch (err: any) {
+          setEstimateError(err.message || 'Could not calculate an estimate.');
+        }
+      }
     } catch (err: any) {
       setAvailabilityResult(null);
       setAvailabilityError(err.message || 'Unable to check availability. Try again.');
     } finally {
       setIsCheckingAvailability(false);
     }
+  };
+
+  const changeGalleryImage = (direction: -1 | 1) => {
+    if (!bike?.images.length) return;
+    setActiveImageIndex((index) => (index + direction + bike.images.length) % bike.images.length);
+  };
+
+  const handleGalleryTouchEnd = (event: React.TouchEvent<HTMLButtonElement>) => {
+    const startX = touchStartX.current;
+    touchStartX.current = null;
+    if (startX === null || bike.images.length < 2) return;
+    const delta = event.changedTouches[0]?.clientX - startX;
+    if (Math.abs(delta) > 45) changeGalleryImage(delta < 0 ? 1 : -1);
   };
 
   if (isLoading) {
@@ -148,7 +173,7 @@ export const BikeDetailPage: React.FC = () => {
     );
   }
 
-  const hubDetails = PLATFORM_CONFIG.hubs.find((h) => h.id === bike.hubId);
+  const hubDetails = config?.hubs.find((h) => h.id === bike.hubId);
   const monthLabel = calendarMonth.toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
   const blockedDate = (date: Date) => calendarUnavailable || blockedRanges.some((range) => {
     const dayStart = new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
@@ -157,7 +182,7 @@ export const BikeDetailPage: React.FC = () => {
   });
 
   return (
-    <div className="max-w-6xl mx-auto px-4 sm:px-6 py-8 w-full">
+    <div className="max-w-6xl mx-auto px-4 sm:px-6 py-8 pb-24 lg:pb-8 w-full">
       {/* Back button */}
       <Link
         to="/browse"
@@ -172,16 +197,26 @@ export const BikeDetailPage: React.FC = () => {
         <div className="lg:col-span-2 flex flex-col gap-6">
           {/* Main Gallery */}
           <div className="flex flex-col gap-3">
-            <div className="relative h-72 sm:h-96 w-full rounded-3xl overflow-hidden bg-neutral-900 border border-neutral-800">
-              <img
-                src={bike.images[activeImageIndex] || bike.images[0]}
-                alt={`${bike.brand} ${bike.model}`}
-                width={1000}
-                height={750}
-                fetchPriority="high"
-                decoding="async"
-                className="w-full h-full object-cover"
-              />
+            <div
+              className="relative h-72 sm:h-96 w-full rounded-3xl overflow-hidden bg-neutral-900 border border-neutral-800"
+              onTouchStart={(event) => { touchStartX.current = event.touches[0]?.clientX ?? null; }}
+              onTouchEnd={handleGalleryTouchEnd}
+            >
+              <button type="button" onClick={() => setGalleryOpen(true)} aria-label="Open photo gallery" className="absolute inset-0 z-0 h-full w-full cursor-zoom-in focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-amber-400">
+                <img
+                  src={bike.images[activeImageIndex] || bike.images[0]}
+                  alt={`${bike.brand} ${bike.model} photo ${activeImageIndex + 1}`}
+                  width={1000}
+                  height={750}
+                  fetchPriority="high"
+                  decoding="async"
+                  className="w-full h-full object-cover"
+                />
+              </button>
+              {bike.images.length > 1 && <>
+                <button type="button" aria-label="Previous photo" onClick={() => changeGalleryImage(-1)} className="absolute left-3 top-1/2 z-10 flex min-h-11 min-w-11 -translate-y-1/2 items-center justify-center rounded-full bg-black/70 text-white focus-visible:ring-2 focus-visible:ring-amber-400"><ChevronLeft size={20}/></button>
+                <button type="button" aria-label="Next photo" onClick={() => changeGalleryImage(1)} className="absolute right-3 top-1/2 z-10 flex min-h-11 min-w-11 -translate-y-1/2 items-center justify-center rounded-full bg-black/70 text-white focus-visible:ring-2 focus-visible:ring-amber-400"><ChevronRight size={20}/></button>
+              </>}
               <div className="absolute top-4 left-4 flex gap-2">
                 <Badge variant="accent" size="md">
                   {bike.bikeType.toUpperCase()}
@@ -222,12 +257,6 @@ export const BikeDetailPage: React.FC = () => {
               <h1 className="text-2xl sm:text-3xl font-extrabold font-heading text-neutral-100">
                 {bike.brand} {bike.model}
               </h1>
-              <div className="flex items-center gap-1.5 bg-neutral-900 border border-neutral-800 px-3 py-1 rounded-xl text-xs font-mono font-bold text-amber-400">
-                <Star className="w-3.5 h-3.5 fill-amber-400 text-amber-400" />
-                <span>{bike.rating.toFixed(2)} rating</span>
-                <span className="text-neutral-500">•</span>
-                <span className="text-neutral-400">{bike.totalTrips} campus trips</span>
-              </div>
             </div>
 
             <p className="text-xs sm:text-sm text-neutral-400">
@@ -421,10 +450,12 @@ export const BikeDetailPage: React.FC = () => {
                     <>
                       <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
                       <div>
-                        <p className="font-semibold">Available for booking!</p>
-                        <p className="text-[11px] text-emerald-300/80 mt-0.5">
-                          This slot was available when checked. Continue to booking to submit a request.
-                        </p>
+                          <p className="font-semibold">Available when checked</p>
+                          <p className="text-[11px] text-emerald-300/80 mt-0.5">
+                            This slot was available when checked. Continue to booking to submit a request.
+                          </p>
+                          {priceEstimate && <p className="mt-2 text-xs font-semibold">Estimated rental + platform fee: ₹{priceEstimate.rentalChargeInr + priceEstimate.platformFeeInr} for {priceEstimate.durationHours} hours. Deposit options are shown in the booking flow.</p>}
+                          {estimateError && <p role="status" className="mt-2 text-[11px]">{estimateError}</p>}
                       </div>
                     </>
                   ) : (
@@ -459,6 +490,21 @@ export const BikeDetailPage: React.FC = () => {
           </Card>
         </div>
       </div>
+
+      <div className="fixed inset-x-0 bottom-0 z-40 border-t border-neutral-800 bg-neutral-950/95 p-3 pb-[calc(0.75rem+env(safe-area-inset-bottom))] backdrop-blur lg:hidden">
+        <div className="mx-auto flex max-w-6xl items-center justify-between gap-3">
+          <div><p className="text-lg font-bold text-amber-300">₹{bike.hourlyRateInr}<span className="ml-1 text-xs font-normal text-neutral-300">/ hour</span></p><p className="text-[11px] text-neutral-400">₹{bike.dailyRateInr} daily cap</p></div>
+          <Link to={`/book/${bike.id}`} className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl bg-amber-400 px-5 font-semibold text-slate-950 focus-visible:ring-2 focus-visible:ring-white">Proceed to book <ArrowRight size={16}/></Link>
+        </div>
+      </div>
+
+      <Modal isOpen={galleryOpen} onClose={() => setGalleryOpen(false)} title={`${bike.brand} ${bike.model} photos`} description={`Photo ${activeImageIndex + 1} of ${bike.images.length}`} maxWidth="2xl">
+        <div className="flex items-center gap-3">
+          {bike.images.length > 1 && <button type="button" aria-label="Previous photo" onClick={() => changeGalleryImage(-1)} className="flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded-full border border-neutral-700 hover:bg-neutral-800 focus-visible:ring-2 focus-visible:ring-amber-400"><ChevronLeft size={20}/></button>}
+          <img src={bike.images[activeImageIndex] || bike.images[0]} alt={`${bike.brand} ${bike.model} photo ${activeImageIndex + 1}`} width="1200" height="900" className="max-h-[65vh] min-w-0 flex-1 rounded-xl object-contain" />
+          {bike.images.length > 1 && <button type="button" aria-label="Next photo" onClick={() => changeGalleryImage(1)} className="flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded-full border border-neutral-700 hover:bg-neutral-800 focus-visible:ring-2 focus-visible:ring-amber-400"><ChevronRight size={20}/></button>}
+        </div>
+      </Modal>
     </div>
   );
 };

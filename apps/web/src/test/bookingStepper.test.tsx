@@ -24,13 +24,16 @@ describe('Booking Stepper Flow & Validation', () => {
     );
 
     await screen.findByText(/Ather 450X Gen 3/i);
-    const returnInput = screen.getByLabelText(/return date & time/i) as HTMLInputElement;
-    fireEvent.change(returnInput, { target: { value: '2020-01-01T10:00' } });
-    await user.click(screen.getByRole('button', { name: /compute server pricing/i }));
+    const returnInput = screen.getByRole('button', { name: /return date and time/i });
+    await user.click(returnInput);
+    const pickupDay = new Date(Date.now() + 24 * 60 * 60 * 1000).toLocaleDateString();
+    await user.click(screen.getByRole('button', { name: `Choose ${pickupDay}` }));
+    fireEvent.change(screen.getByLabelText(/return date and time time/i), { target: { value: '00:00' } });
+    await user.click(screen.getByRole('button', { name: 'Done' }));
+    await user.click(screen.getByRole('button', { name: /check availability and price/i }));
 
     expect(returnInput).toHaveAttribute('aria-invalid', 'true');
-    expect(returnInput).toHaveValue('2020-01-01T10:00');
-    expect(screen.getByText('Return time must be later than pickup time.')).toBeInTheDocument();
+    expect(screen.getByText('Return must be later than pickup.')).toBeInTheDocument();
     expect(screen.getByText('Review the highlighted booking details.')).toBeInTheDocument();
   });
 
@@ -57,16 +60,40 @@ describe('Booking Stepper Flow & Validation', () => {
     expect(screen.getByText(/Campus Hub Security Deposit/i)).toBeInTheDocument();
 
     // Advance to Step 2
-    const computeBtn = screen.getByRole('button', { name: /compute server pricing/i });
+    const computeBtn = screen.getByRole('button', { name: /check availability and price/i });
     await user.click(computeBtn);
 
     // Wait for server-calculated pricing breakdown
-    expect(await screen.findByText(/transparent pricing breakdown/i)).toBeInTheDocument();
+    expect(await screen.findByText(/price calculated by the server/i)).toBeInTheDocument();
     expect(screen.getByText(/total payable at handover/i)).toBeInTheDocument();
-    expect(screen.getByText(/pay at campus handover/i)).toBeInTheDocument();
+    expect(screen.getByText(/payment is collected at handover/i)).toBeInTheDocument();
   });
 
-  it('guarantees NO Aadhaar fields exist in verification step', async () => {
+  it('keeps the terms step locked until consent and each required document exist', async () => {
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter initialEntries={['/book/bike-ather-450x']}>
+        <ToastProvider><AuthProvider><Routes><Route path="/book/:id" element={<BookingFlowPage />} /></Routes></AuthProvider></ToastProvider>
+      </MemoryRouter>
+    );
+
+    await screen.findByText(/Ather 450X Gen 3/i);
+    await user.click(screen.getByRole('button', { name: /check availability and price/i }));
+    await screen.findByText(/price calculated by the server/i);
+    await user.click(screen.getByRole('button', { name: /continue to documents/i }));
+
+    await user.click(screen.getByRole('button', { name: /continue to terms/i }));
+    expect(screen.getByText('Upload every required document before continuing.')).toBeInTheDocument();
+    expect(screen.queryByText(/review and send booking request/i)).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('checkbox', { name: /i have read this notice/i }));
+    await user.click(screen.getByRole('button', { name: /agree and continue to upload/i }));
+    await user.click(screen.getByRole('button', { name: /continue to terms/i }));
+    expect(screen.getByText('Upload every required document before continuing.')).toBeInTheDocument();
+    expect(screen.queryByText(/review and send booking request/i)).not.toBeInTheDocument();
+  });
+
+  it('shows the required Aadhaar field and the masking reminder when enabled by public config', async () => {
     const user = userEvent.setup();
 
     render(
@@ -82,21 +109,19 @@ describe('Booking Stepper Flow & Validation', () => {
     );
 
     await screen.findByText(/Ather 450X Gen 3/i);
-    await user.click(screen.getByRole('button', { name: /compute server pricing/i }));
-    await screen.findByText(/transparent pricing breakdown/i);
+    await user.click(screen.getByRole('button', { name: /check availability and price/i }));
+    await screen.findByText(/price calculated by the server/i);
 
     // Advance to document upload
-    await user.click(screen.getByRole('button', { name: /confirm & upload ids/i }));
+    await user.click(screen.getByRole('button', { name: /continue to documents/i }));
 
-    expect(await screen.findByText(/student driving clearance & id upload/i)).toBeInTheDocument();
+    expect(await screen.findByText(/documents for team review/i)).toBeInTheDocument();
 
-    // Ensure Driving Licence and Student ID are present
-    expect(screen.getByText(/two-wheeler driving licence/i)).toBeInTheDocument();
-    expect(screen.getAllByText(/icfai student id card/i).length).toBeGreaterThan(0);
-
-    // STRICT CHECK: Ensure NO Aadhaar input, label, or upload field exists
-    expect(screen.queryByLabelText(/aadhaar/i)).not.toBeInTheDocument();
-    expect(screen.queryByPlaceholderText(/aadhaar/i)).not.toBeInTheDocument();
-    expect(screen.queryByRole('textbox', { name: /aadhaar/i })).not.toBeInTheDocument();
+    await user.click(screen.getByRole('checkbox', { name: /i have read this notice/i }));
+    await user.click(screen.getByRole('button', { name: /agree and continue to upload/i }));
+    expect(await screen.findByText(/aadhaar upload reminder/i)).toBeInTheDocument();
+    expect(screen.getAllByText(/two-wheeler driving licence/i).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/college student id/i).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/aadhaar/i).length).toBeGreaterThan(0);
   });
 });
