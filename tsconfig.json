@@ -16,14 +16,12 @@
     "allowJs": true,
     "jsx": "react-jsx",
     "paths": {
-      "@/*": [
-        "./src/*",
-        "./*"
-      ]
+      "@/*": ["./apps/web/src/*"],
+      "@riders-path/shared": ["./packages/shared/src/index.ts"]
     },
     "types": ["vitest/globals", "@testing-library/jest-dom"],
     "allowImportingTsExtensions": true,
     "noEmit": true
   },
-  "include": ["src", "vitest.config.ts", "vite.config.ts"]
+  "include": ["apps/web/src", "packages/shared/src", "vitest.config.ts", "vite.config.ts"]
 }

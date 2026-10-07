@@ -5,6 +5,7 @@ import { env } from '../config/env';
 
 export const STUDENT_SESSION_COOKIE = 'rp_student_session';
 export const ADMIN_SESSION_COOKIE = 'rp_admin_session';
+export const CSRF_COOKIE = 'rp_csrf_token';
 export const STUDENT_SESSION_COOKIE_OPTIONS = {
   httpOnly: true,
   secure: env.NODE_ENV === 'production',
@@ -56,7 +57,8 @@ export function verifyCsrfOrigin(req: Request, res: Response, next: NextFunction
 
   const origin = req.headers.origin || req.headers.referer;
   if (!origin) {
-    // Direct server-to-server or test requests without browser origin
+    // Browser requests carry Origin or Referer. Keep the API usable for direct
+    // server-to-server callers and tests that do not send browser credentials.
     return next();
   }
 
@@ -68,6 +70,17 @@ export function verifyCsrfOrigin(req: Request, res: Response, next: NextFunction
     }
   } catch {
     return res.status(403).json({ error: 'CSRF Protection: Invalid request origin' });
+  }
+
+  const cookieToken = req.cookies?.[CSRF_COOKIE];
+  const headerToken = req.get('x-csrf-token');
+  if (typeof cookieToken !== 'string' || typeof headerToken !== 'string') {
+    return res.status(403).json({ error: 'CSRF Protection: Token required', code: 'CSRF_TOKEN_REQUIRED' });
+  }
+  const cookieBuffer = Buffer.from(cookieToken);
+  const headerBuffer = Buffer.from(headerToken);
+  if (cookieBuffer.length !== headerBuffer.length || !crypto.timingSafeEqual(cookieBuffer, headerBuffer)) {
+    return res.status(403).json({ error: 'CSRF Protection: Invalid token', code: 'CSRF_TOKEN_INVALID' });
   }
 
   next();

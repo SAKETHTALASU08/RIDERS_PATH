@@ -17,6 +17,7 @@ import {
   STUDENT_SESSION_COOKIE_OPTIONS,
   STUDENT_SESSION_COOKIE_CLEAR_OPTIONS,
   ADMIN_SESSION_COOKIE,
+  CSRF_COOKIE,
 } from './server/middleware/auth';
 import {
   globalLimiter,
@@ -37,8 +38,8 @@ import {
   OwnerOnboardingSchema,
   PublicBikeDtoSchema,
   PricingBreakdownSchema,
-} from './src/shared/contract';
-import { PLATFORM_CONFIG } from './src/config/platform.config';
+} from './packages/shared/src/contract';
+import { PLATFORM_CONFIG } from './packages/shared/src/platform.config';
 
 // Initialize Database Schema & Seed Data
 runMigrations();
@@ -123,6 +124,19 @@ setInterval(() => {
 // ----------------------------------------------------
 app.get('/api/health', (_req: Request, res: Response) => {
   res.json({ status: 'ok', service: 'Riders Path Secure API', time: new Date().toISOString() });
+});
+
+// Double-submit CSRF token: the browser keeps the cookie and echoes its value
+// in a request header. The token is not an authentication credential.
+app.get('/api/csrf-token', (_req: Request, res: Response) => {
+  const csrfToken = crypto.randomBytes(32).toString('hex');
+  res.cookie(CSRF_COOKIE, csrfToken, {
+    httpOnly: false,
+    secure: env.NODE_ENV === 'production',
+    sameSite: 'lax',
+    path: '/',
+  });
+  res.json({ csrfToken });
 });
 
 // Explicit allowlist public config (never leaks secrets or internal hashes)

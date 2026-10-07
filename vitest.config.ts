@@ -11,13 +11,14 @@ export default defineConfig({
   plugins: [react()],
   resolve: {
     alias: {
-      '@': path.resolve(__dirname, './src'),
+      '@': path.resolve(__dirname, './apps/web/src'),
+      '@riders-path/shared': path.resolve(__dirname, './packages/shared/src/index.ts'),
     },
   },
   test: {
     globals: true,
     environment: 'jsdom',
-    setupFiles: ['./src/test/setup.ts'],
+    setupFiles: ['./apps/web/src/test/setup.ts'],
     // Backend integration suites share the same SQLite connection and must not race each other.
     fileParallelism: false,
   },

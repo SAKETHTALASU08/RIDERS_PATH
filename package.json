@@ -3,9 +3,15 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
+  "workspaces": [
+    "apps/web",
+    "packages/shared"
+  ],
   "scripts": {
     "dev": "tsx server.ts",
-    "build": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
+    "dev:web": "vite --config vite.config.ts",
+    "build": "vite build --config vite.config.ts && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs && npm run prerender:landing",
+    "prerender:landing": "tsx scripts/prerender-landing.tsx",
     "preview": "npm run build && node -e \"process.env.NODE_ENV='production'; require('./dist/server.cjs')\"",
     "start": "node dist/server.cjs",
     "clean": "rm -rf dist server.js",

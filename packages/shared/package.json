@@ -1,0 +1,15 @@
+{
+  "name": "@riders-path/shared",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./contract": "./src/contract.ts",
+    "./validators": "./src/validators.ts",
+    "./platform-config": "./src/platform.config.ts"
+  },
+  "dependencies": {
+    "zod": "^4.6.5"
+  }
+}
