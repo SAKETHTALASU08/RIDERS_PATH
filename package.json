@@ -5,12 +5,17 @@
   "type": "module",
   "workspaces": [
     "apps/web",
+    "apps/admin",
     "packages/shared"
   ],
   "scripts": {
     "dev": "tsx server.ts",
     "dev:web": "vite --config vite.config.ts",
-    "build": "vite build --config vite.config.ts && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs && npm run prerender:landing",
+    "build": "npm run build:web && npm run build:admin && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs && npm run prerender:landing",
+    "build:web": "vite build --config vite.config.ts && npm run check:student-bundle",
+    "build:admin": "vite build --config vite.admin.config.ts",
+    "check:student-bundle": "node scripts/check-student-bundle.mjs",
+    "dev:admin": "vite --config vite.admin.config.ts",
     "prerender:landing": "tsx scripts/prerender-landing.tsx",
     "preview": "npm run build && node -e \"process.env.NODE_ENV='production'; require('./dist/server.cjs')\"",
     "start": "node dist/server.cjs",
@@ -20,6 +25,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1147.0",
     "@google/genai": "^2.4.0",
     "@tailwindcss/vite": "^4.1.14",
     "@vitejs/plugin-react": "^5.0.4",
@@ -38,6 +44,7 @@
     "react": "^19.0.1",
     "react-dom": "^19.0.1",
     "react-router-dom": "^7.18.4",
+    "sharp": "^0.35.5",
     "vite": "^6.2.3",
     "zod": "^4.6.5"
   },

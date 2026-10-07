@@ -14,6 +14,17 @@ const EnvSchema = z.object({
     .string()
     .default('$2a$10$wE6O6Rkm3y1rV7YVp5QeEeZcK/25K4V5f0E4y39mO54kG8Fw6p3jS'),
   CORS_ORIGIN: z.string().default('http://localhost:5173'),
+  ADMIN_CORS_ORIGIN: z.string().default('http://localhost:5174'),
+  DOCUMENT_STORAGE_DRIVER: z.enum(['local', 's3']).default('local'),
+  DOCUMENT_ENCRYPTION_KEY: z.string().optional(),
+  DOCUMENT_S3_BUCKET: z.string().optional(),
+  DOCUMENT_S3_REGION: z.string().default('ap-south-1'),
+  DOCUMENT_S3_ENDPOINT: z.string().optional(),
+  DOCUMENT_S3_KMS_KEY_ID: z.string().optional(),
+  DOCUMENT_RETENTION_DAYS: z.coerce.number().int().positive().default(30),
+  UNUSED_DOCUMENT_RETENTION_DAYS: z.coerce.number().int().positive().default(7),
+  REQUIRE_AADHAAR_UPLOAD: z.string().default('true').transform((value) => value.toLowerCase() === 'true'),
+  DOCUMENT_CONSENT_VERSION: z.string().default('documents-2026-10-v1'),
   GEMINI_API_KEY: z.string().optional(),
 
   // Configure only with the actual campus domains. Empty means OTP is unavailable.
@@ -53,6 +64,17 @@ const EnvSchema = z.object({
       if (!config[key].trim()) {
         ctx.addIssue({ code: 'custom', path: [key], message: `${key} is required in production` });
       }
+    }
+    if (config.DOCUMENT_STORAGE_DRIVER !== 's3' || !config.DOCUMENT_S3_BUCKET) {
+      ctx.addIssue({ code: 'custom', path: ['DOCUMENT_STORAGE_DRIVER'], message: 'Production document storage requires DOCUMENT_STORAGE_DRIVER=s3 and DOCUMENT_S3_BUCKET' });
+    }
+    if (config.DOCUMENT_STORAGE_DRIVER === 's3' && !config.DOCUMENT_S3_KMS_KEY_ID) {
+      ctx.addIssue({ code: 'custom', path: ['DOCUMENT_S3_KMS_KEY_ID'], message: 'Production S3 document storage requires a KMS key id' });
+    }
+  }
+  if (config.DOCUMENT_STORAGE_DRIVER === 'local' && config.NODE_ENV !== 'test') {
+    if (!config.DOCUMENT_ENCRYPTION_KEY || Buffer.from(config.DOCUMENT_ENCRYPTION_KEY, 'base64').length !== 32) {
+      ctx.addIssue({ code: 'custom', path: ['DOCUMENT_ENCRYPTION_KEY'], message: 'Local document storage requires a base64-encoded 32-byte DOCUMENT_ENCRYPTION_KEY' });
     }
   }
 

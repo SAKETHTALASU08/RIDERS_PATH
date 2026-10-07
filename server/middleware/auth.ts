@@ -6,6 +6,7 @@ import { env } from '../config/env';
 export const STUDENT_SESSION_COOKIE = 'rp_student_session';
 export const ADMIN_SESSION_COOKIE = 'rp_admin_session';
 export const CSRF_COOKIE = 'rp_csrf_token';
+export const ADMIN_CSRF_COOKIE = 'rp_admin_csrf_token';
 export const STUDENT_SESSION_COOKIE_OPTIONS = {
   httpOnly: true,
   secure: env.NODE_ENV === 'production',
@@ -64,7 +65,10 @@ export function verifyCsrfOrigin(req: Request, res: Response, next: NextFunction
 
   try {
     const originHost = new URL(origin).origin;
-    const allowed = [env.CORS_ORIGIN, 'http://localhost:3000', 'http://localhost:5173', 'http://127.0.0.1:3000', 'http://127.0.0.1:5173'];
+    const adminPath = req.path.startsWith('/api/admin');
+    const allowed = adminPath
+      ? [env.ADMIN_CORS_ORIGIN, 'http://localhost:5174', 'http://127.0.0.1:5174']
+      : [env.CORS_ORIGIN, 'http://localhost:3000', 'http://localhost:5173', 'http://127.0.0.1:3000', 'http://127.0.0.1:5173'];
     if (!allowed.includes(originHost)) {
       return res.status(403).json({ error: 'CSRF Protection: Cross-origin request blocked' });
     }
@@ -72,7 +76,8 @@ export function verifyCsrfOrigin(req: Request, res: Response, next: NextFunction
     return res.status(403).json({ error: 'CSRF Protection: Invalid request origin' });
   }
 
-  const cookieToken = req.cookies?.[CSRF_COOKIE];
+  const cookieName = req.path.startsWith('/api/admin') ? ADMIN_CSRF_COOKIE : CSRF_COOKIE;
+  const cookieToken = req.cookies?.[cookieName];
   const headerToken = req.get('x-csrf-token');
   if (typeof cookieToken !== 'string' || typeof headerToken !== 'string') {
     return res.status(403).json({ error: 'CSRF Protection: Token required', code: 'CSRF_TOKEN_REQUIRED' });

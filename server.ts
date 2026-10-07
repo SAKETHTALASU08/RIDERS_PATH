@@ -5,6 +5,7 @@ import cors from 'cors';
 import cookieParser from 'cookie-parser';
 import crypto from 'crypto';
 import { z } from 'zod';
+import sharp from 'sharp';
 import { env, getAllowedEmailDomains } from './server/config/env';
 import { db, runMigrations, sqlite } from './server/db';
 import {
@@ -18,6 +19,7 @@ import {
   STUDENT_SESSION_COOKIE_CLEAR_OPTIONS,
   ADMIN_SESSION_COOKIE,
   CSRF_COOKIE,
+  ADMIN_CSRF_COOKIE,
 } from './server/middleware/auth';
 import {
   globalLimiter,
@@ -26,7 +28,9 @@ import {
   ownerLimiter,
   geminiLimiter,
 } from './server/middleware/rateLimit';
-import { documentUpload, verifyMagicBytes } from './server/middleware/upload';
+import { documentUpload, detectImageMime } from './server/middleware/upload';
+import { createShortLivedDocumentUrl, deletePrivateDocument, readPrivateDocument, storePrivateDocument } from './server/services/privateDocumentStorage';
+import { purgeExpiredDocuments } from './server/services/documentRetention';
 import { verifyDocumentWithGemini } from './server/gemini';
 import { getMailer } from './server/services/mailer';
 import {
@@ -35,6 +39,7 @@ import {
   createProfileCompletionSchema,
   createManualVerificationRequestSchema,
   BookingCreateSchema,
+  BookingResponseSchema,
   OwnerOnboardingSchema,
   PublicBikeDtoSchema,
   PricingBreakdownSchema,
@@ -61,33 +66,26 @@ app.use(
         styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
         fontSrc: ["'self'", 'https://fonts.gstatic.com'],
         imgSrc: ["'self'", 'data:', 'https://images.unsplash.com', 'blob:'],
-        connectSrc: ["'self'", env.CORS_ORIGIN],
+        connectSrc: ["'self'", env.CORS_ORIGIN, env.ADMIN_CORS_ORIGIN],
       },
     },
     crossOriginEmbedderPolicy: false,
   })
 );
 
-app.use(
+app.use((req, res, next) => {
+  const adminEndpoint = req.path.startsWith('/api/admin/');
+  const allowedOrigins = adminEndpoint
+    ? [env.ADMIN_CORS_ORIGIN, 'http://localhost:5174', 'http://127.0.0.1:5174']
+    : [env.CORS_ORIGIN, 'http://localhost:3000', 'http://localhost:5173', 'http://127.0.0.1:3000', 'http://127.0.0.1:5173'];
   cors({
     origin: (origin, callback) => {
-      // Allow requests with no origin (e.g. mobile apps, curl, supertest)
-      if (!origin) return callback(null, true);
-      const allowedOrigins = [
-        env.CORS_ORIGIN,
-        'http://localhost:3000',
-        'http://localhost:5173',
-        'http://127.0.0.1:3000',
-        'http://127.0.0.1:5173',
-      ];
-      if (allowedOrigins.includes(origin)) {
-        return callback(null, true);
-      }
+      if (!origin || allowedOrigins.includes(origin)) return callback(null, true);
       callback(new Error('CORS origin unauthorized'));
     },
     credentials: true,
-  })
-);
+  })(req, res, next);
+});
 
 app.use(cookieParser(env.SESSION_SECRET));
 
@@ -119,6 +117,10 @@ setInterval(() => {
   }
 }, 5 * 60 * 1000);
 
+const documentCleanupTimer = setInterval(() => { void purgeExpiredDocuments(); }, 60 * 60 * 1000);
+documentCleanupTimer.unref?.();
+void purgeExpiredDocuments();
+
 // ----------------------------------------------------
 // PUBLIC CONFIG & HEALTH ROUTES
 // ----------------------------------------------------
@@ -138,6 +140,11 @@ app.get('/api/csrf-token', (_req: Request, res: Response) => {
   });
   res.json({ csrfToken });
 });
+app.get('/api/admin/csrf-token', (_req: Request, res: Response) => {
+  const csrfToken = crypto.randomBytes(32).toString('hex');
+  res.cookie(ADMIN_CSRF_COOKIE, csrfToken, { httpOnly: false, secure: env.NODE_ENV === 'production', sameSite: 'strict', path: '/' });
+  res.json({ csrfToken });
+});
 
 // Explicit allowlist public config (never leaks secrets or internal hashes)
 app.get('/api/config', (_req: Request, res: Response) => {
@@ -151,6 +158,8 @@ app.get('/api/config', (_req: Request, res: Response) => {
     enrollmentFormatExample: env.ENROLLMENT_FORMAT_EXAMPLE,
     termsVersion: PLATFORM_CONFIG.termsVersion,
     privacyVersion: PLATFORM_CONFIG.privacyVersion,
+    requireAadhaarUpload: env.REQUIRE_AADHAAR_UPLOAD,
+    documentConsentVersion: env.DOCUMENT_CONSENT_VERSION,
     depositPolicy: PLATFORM_CONFIG.depositPolicy,
     hubs: PLATFORM_CONFIG.hubs,
     safetyRules: PLATFORM_CONFIG.safetyRules,
@@ -178,7 +187,7 @@ app.put('/api/config', requireAdmin, (req: Request, res: Response) => {
     userAgent: req.headers['user-agent'],
   });
 
-  res.json(updated);
+  res.json(updated ? BookingResponseSchema.parse(updated) : null);
 });
 
 // ----------------------------------------------------
@@ -625,6 +634,7 @@ app.post('/api/admin/login', authLimiter, (req: Request, res: Response) => {
     httpOnly: true,
     secure: env.NODE_ENV === 'production',
     sameSite: 'strict',
+    path: '/',
     maxAge: 24 * 60 * 60 * 1000,
   });
 
@@ -638,20 +648,41 @@ app.post('/api/admin/login', authLimiter, (req: Request, res: Response) => {
     userAgent: req.headers['user-agent'],
   });
 
-  res.json({ success: true, token: rawToken, message: 'Admin authenticated successfully' });
+  res.json({ success: true, message: 'Admin authenticated successfully' });
 });
 
 app.post('/api/admin/logout', requireAdmin, (req: Request, res: Response) => {
   if (req.rawSessionToken) {
     db.deleteSession(req.rawSessionToken);
   }
-  res.clearCookie(ADMIN_SESSION_COOKIE);
+  res.clearCookie(ADMIN_SESSION_COOKIE, { httpOnly: true, secure: env.NODE_ENV === 'production', sameSite: 'strict', path: '/' });
   res.json({ success: true, message: 'Admin session closed' });
 });
 
 // ----------------------------------------------------
 // BIKES CATALOG & AVAILABILITY ROUTES
 // ----------------------------------------------------
+app.get('/api/favorites', requireUser, (req: Request, res: Response) => {
+  const rows = sqlite.prepare('SELECT bike_id FROM bike_favorites WHERE user_id = ? ORDER BY created_at DESC')
+    .all(req.user!.id) as Array<{ bike_id: string }>;
+  res.json(rows.map((row) => row.bike_id));
+});
+
+app.put('/api/favorites/:bikeId', requireUser, (req: Request, res: Response) => {
+  const bike = db.getBikeById(req.params.bikeId);
+  if (!bike || bike.approvalStatus !== 'APPROVED' || bike.availabilityStatus !== 'AVAILABLE') {
+    return res.status(404).json({ error: 'Bike not found in the public catalog.' });
+  }
+  sqlite.prepare('INSERT OR IGNORE INTO bike_favorites (user_id, bike_id, created_at) VALUES (?, ?, ?)')
+    .run(req.user!.id, bike.id, new Date().toISOString());
+  res.json({ success: true });
+});
+
+app.delete('/api/favorites/:bikeId', requireUser, (req: Request, res: Response) => {
+  sqlite.prepare('DELETE FROM bike_favorites WHERE user_id = ? AND bike_id = ?').run(req.user!.id, req.params.bikeId);
+  res.json({ success: true });
+});
+
 // Public endpoint maps strictly through PublicBikeDtoSchema (strips all owner PII)
 app.get('/api/bikes', (req: Request, res: Response) => {
   const { q, bikeType, fuelType, hubId, maxHourlyRate, sortBy } = req.query;
@@ -682,8 +713,7 @@ app.get('/api/bikes', (req: Request, res: Response) => {
     images: b.images,
     features: b.features,
     isInstantBooking: b.isInstantBooking,
-    rating: b.rating,
-    totalTrips: b.totalTrips,
+    listedAt: b.createdAt,
     conditionNotes: b.conditionNotes,
     registrationMasked: b.displayRegistrationToPublic ? b.registrationNumber : b.registrationMasked,
   }));
@@ -693,8 +723,8 @@ app.get('/api/bikes', (req: Request, res: Response) => {
     publicList.sort((a, b) => a.hourlyRateInr - b.hourlyRateInr);
   } else if (sortBy === 'price_desc') {
     publicList.sort((a, b) => b.hourlyRateInr - a.hourlyRateInr);
-  } else if (sortBy === 'rating') {
-    publicList.sort((a, b) => b.rating - a.rating);
+  } else {
+    publicList.sort((a, b) => b.listedAt.localeCompare(a.listedAt));
   }
 
   res.json(publicList);
@@ -727,8 +757,7 @@ app.get('/api/bikes/:id', (req: Request, res: Response) => {
     images: bike.images,
     features: bike.features,
     isInstantBooking: bike.isInstantBooking,
-    rating: bike.rating,
-    totalTrips: bike.totalTrips,
+    listedAt: bike.createdAt,
     conditionNotes: bike.conditionNotes,
     registrationMasked: bike.displayRegistrationToPublic ? bike.registrationNumber : bike.registrationMasked,
   };
@@ -831,15 +860,6 @@ app.post(
   requireProfileComplete,
   bookingLimiter,
   (req: Request, res: Response) => {
-    // Clear hook: Driving licence verification required by campus coordinator
-    const REQUIRE_ADMIN_APPROVED_LICENCE = true; // Admin verification flow/UI will manage this flag.
-    if (REQUIRE_ADMIN_APPROVED_LICENCE && !req.user!.drivingLicenceVerified) {
-      return res.status(403).json({
-        error: 'Your driving licence must be verified by a campus coordinator before booking.',
-        code: 'LICENCE_VERIFICATION_REQUIRED',
-      });
-    }
-
     const parseResult = BookingCreateSchema.safeParse(req.body);
     if (!parseResult.success) {
       return res.status(400).json({
@@ -918,8 +938,9 @@ app.post(
       depositInr,
       depositType: data.depositType,
       totalPayableInr,
-      drivingLicenseDocPath: data.drivingLicenceImage,
-      studentIdDocPath: data.studentIdCardImage,
+      documentConsentId: data.documentConsentId,
+      documentIds: data.documentIds,
+      requireAadhaar: env.REQUIRE_AADHAAR_UPLOAD,
       agreedTermsVersion: data.agreedToTermsVersion,
       idempotencyKey: data.idempotencyKey,
     });
@@ -935,10 +956,17 @@ app.post(
       userAgent: req.headers['user-agent'],
     });
 
-    res.status(201).json(createdBooking);
+    res.status(201).json(BookingResponseSchema.parse(createdBooking));
   } catch (err: any) {
+    console.error('Booking create failed:', err instanceof Error ? err.message : 'unknown error');
     if (err.message && err.message.includes('CONCURRENT_CONFLICT')) {
       return res.status(409).json({ error: 'This bike was just booked by another student for these dates.' });
+    }
+    if (['DOCUMENT_CONSENT_OR_DOCUMENTS_INVALID', 'DOCUMENTS_REQUIRED'].includes(err.message)) {
+      return res.status(400).json({ error: 'Please provide current consent and all required documents before booking.', code: 'DOCUMENTS_REQUIRED' });
+    }
+    if (err.message === 'IDEMPOTENCY_KEY_CONFLICT') {
+      return res.status(409).json({ error: 'This booking request key has already been used.', code: 'IDEMPOTENCY_CONFLICT' });
     }
     res.status(500).json({ error: 'Failed to create booking' });
   }
@@ -946,7 +974,7 @@ app.post(
 
 app.get('/api/bookings/my', requireUser, (req: Request, res: Response) => {
   const bookings = db.getBookings(req.user!.id);
-  res.json(bookings);
+  res.json(bookings.map((booking) => BookingResponseSchema.parse(booking)));
 });
 
 // Single booking with ownership or admin enforcement
@@ -976,7 +1004,7 @@ app.get('/api/bookings/:id', (req: Request, res: Response) => {
     return res.status(403).json({ error: 'Access Denied: You do not own this reservation' });
   }
 
-  res.json(booking);
+  res.json(BookingResponseSchema.parse(booking));
 });
 
 app.post('/api/bookings/:id/cancel', requireUser, (req: Request, res: Response) => {
@@ -1121,8 +1149,7 @@ app.get('/api/owner/listings', requireUser, (req: Request, res: Response) => {
       images: b.images,
       features: b.features,
       isInstantBooking: b.isInstantBooking,
-      rating: b.rating,
-      totalTrips: b.totalTrips,
+      listedAt: b.createdAt,
       conditionNotes: b.conditionNotes,
       registrationMasked: b.registrationMasked,
     },
@@ -1141,40 +1168,226 @@ app.get('/api/owner/listings', requireUser, (req: Request, res: Response) => {
 });
 
 // ----------------------------------------------------
-// DEDICATED FILE UPLOAD ROUTE (5MB Cap + Magic-Byte Sniffing)
+// PRIVATE DOCUMENT UPLOADS, CONSENT, AND HUMAN REVIEW
 // ----------------------------------------------------
+app.post('/api/documents/consent', requireUser, requireEmailVerified, requireProfileComplete, (req: Request, res: Response) => {
+  if (req.body?.accepted !== true || req.body?.version !== env.DOCUMENT_CONSENT_VERSION) {
+    return res.status(400).json({ error: 'Review the current document notice and confirm consent.', code: 'CONSENT_REQUIRED' });
+  }
+  const id = crypto.randomUUID();
+  sqlite.prepare(`INSERT INTO document_consents (id, user_id, version, accepted_at, ip_address, user_agent) VALUES (?, ?, ?, ?, ?, ?)`)
+    .run(id, req.user!.id, env.DOCUMENT_CONSENT_VERSION, new Date().toISOString(), req.ip, req.headers['user-agent'] || null);
+  res.status(201).json({ id, version: env.DOCUMENT_CONSENT_VERSION });
+});
+
 app.post(
   '/api/upload/documents',
   requireUser,
-  documentUpload.fields([
-    { name: 'drivingLicence', maxCount: 1 },
-    { name: 'studentId', maxCount: 1 },
-  ]),
-  verifyMagicBytes,
-  (req: Request, res: Response) => {
-    const files = req.files as { [fieldname: string]: Express.Multer.File[] } | undefined;
-    if (!files) {
-      return res.status(400).json({ error: 'No documents provided for upload' });
-    }
+  requireEmailVerified,
+  requireProfileComplete,
+  documentUpload.single('file'),
+  (req: Request, res: Response, next: NextFunction) => {
+    void (async () => {
+      const file = req.file;
+      const type = req.body?.documentType;
+      const consentId = req.body?.consentId;
+      if (!file || !['driving_license', 'student_id', 'aadhaar'].includes(type)) {
+        return res.status(400).json({ error: 'Choose a required document and image file.', code: 'DOCUMENT_REQUIRED' });
+      }
+      if (type === 'aadhaar' && !env.REQUIRE_AADHAAR_UPLOAD) {
+        return res.status(400).json({ error: 'Aadhaar upload is not enabled.', code: 'DOCUMENT_NOT_ENABLED' });
+      }
+      const consent = sqlite.prepare(`SELECT id FROM document_consents WHERE id = ? AND user_id = ? AND version = ?`)
+        .get(consentId, req.user!.id, env.DOCUMENT_CONSENT_VERSION);
+      if (!consent) return res.status(403).json({ error: 'Current document consent is required before upload.', code: 'CONSENT_REQUIRED' });
+      const inputMime = detectImageMime(file.buffer);
+      if (!inputMime) return res.status(400).json({ error: 'Choose a valid JPEG, PNG, or WebP image.', code: 'INVALID_FILE_TYPE' });
 
-    const dlFile = files['drivingLicence']?.[0];
-    const studentIdFile = files['studentId']?.[0];
-
-    res.json({
-      success: true,
-      drivingLicencePath: dlFile ? `/uploads/${dlFile.filename}` : null,
-      studentIdPath: studentIdFile ? `/uploads/${studentIdFile.filename}` : null,
-    });
+      const imageId = crypto.randomUUID();
+      let normalized: Buffer;
+      try {
+        normalized = await sharp(file.buffer, { limitInputPixels: 40_000_000, failOn: 'error' })
+          .rotate()
+          .resize({ width: 2400, height: 2400, fit: 'inside', withoutEnlargement: true })
+          .jpeg({ quality: 84, mozjpeg: true })
+          .toBuffer();
+      } catch {
+        return res.status(400).json({ error: 'This image could not be safely processed. Choose another image.', code: 'INVALID_IMAGE' });
+      }
+      if (normalized.length > 5 * 1024 * 1024) {
+        return res.status(400).json({ error: 'Processed image exceeds the 5 MB limit.', code: 'FILE_TOO_LARGE' });
+      }
+      try {
+        const objectKey = await storePrivateDocument(imageId, normalized, 'image/jpeg');
+        sqlite.prepare(`
+          INSERT INTO user_documents (id, user_id, consent_id, document_type, object_key, storage_driver, mime_type, byte_size, uploaded_at)
+          VALUES (?, ?, ?, ?, ?, ?, 'image/jpeg', ?, ?)
+        `).run(imageId, req.user!.id, consentId, type, objectKey, env.DOCUMENT_STORAGE_DRIVER, normalized.length, new Date().toISOString());
+        return res.status(201).json({ id: imageId, documentType: type, reviewStatus: 'pending', byteSize: normalized.length });
+      } catch (error) {
+        next(error);
+      }
+    })().catch(next);
   }
 );
+
+app.delete('/api/upload/documents/:id', requireUser, requireEmailVerified, requireProfileComplete, (req: Request, res: Response, next: NextFunction) => {
+  void (async () => {
+    const document = sqlite.prepare(`SELECT id, object_key FROM user_documents WHERE id = ? AND user_id = ? AND booking_id IS NULL AND deleted_at IS NULL`)
+      .get(req.params.id, req.user!.id) as { id: string; object_key: string } | undefined;
+    if (!document) return res.status(404).json({ error: 'Unattached document not found.', code: 'DOCUMENT_NOT_FOUND' });
+    await deletePrivateDocument(document.object_key);
+    sqlite.prepare('DELETE FROM user_documents WHERE id = ? AND user_id = ? AND booking_id IS NULL').run(document.id, req.user!.id);
+    res.json({ success: true });
+  })().catch(next);
+});
+
+app.get('/api/admin/documents', requireAdmin, (req: Request, res: Response) => {
+  const status = req.query.status === 'approved' || req.query.status === 'rejected' ? req.query.status : 'pending';
+  const rows = sqlite.prepare(`
+    SELECT d.id, d.document_type, d.byte_size, d.review_status, d.review_reason, d.uploaded_at, d.booking_id,
+      substr(d.user_id, 1, 8) AS student_ref, u.email, u.icfai_enrollment
+    FROM user_documents d JOIN users u ON u.id = d.user_id
+    WHERE d.review_status = ? AND d.deleted_at IS NULL ORDER BY d.uploaded_at ASC LIMIT 200
+  `).all(status) as Array<any>;
+  res.json(rows.map((row) => ({
+    id: row.id,
+    documentType: row.document_type,
+    byteSize: row.byte_size,
+    reviewStatus: row.review_status,
+    reviewReason: row.review_reason,
+    uploadedAt: row.uploaded_at,
+    bookingId: row.booking_id,
+    studentRef: `Student ${row.student_ref}`,
+    emailMasked: maskEmail(row.email),
+    enrollmentMasked: maskTail(row.icfai_enrollment, 3),
+  })));
+});
+
+function maskEmail(email: string) {
+  const [local, domain] = email.split('@');
+  return `${local?.slice(0, 1) || '*'}***@${domain || 'hidden'}`;
+}
+function maskTail(value: string | null, visible: number) {
+  if (!value) return 'Not provided';
+  return `${'•'.repeat(Math.max(4, value.length - visible))}${value.slice(-visible)}`;
+}
+
+app.get('/api/admin/documents/:id/view-url', requireAdmin, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const document = sqlite.prepare(`SELECT id, object_key FROM user_documents WHERE id = ? AND deleted_at IS NULL`)
+      .get(req.params.id) as { id: string; object_key: string } | undefined;
+    if (!document) return res.status(404).json({ error: 'Document not found.' });
+    const url = createShortLivedDocumentUrl(document.id, req.admin!.id);
+    db.logAudit({ actorId: req.admin!.id, actorRole: 'admin', action: 'DOCUMENT_VIEW_URL_ISSUED', targetType: 'user_document', targetId: document.id, ipAddress: req.ip, userAgent: req.headers['user-agent'] });
+    res.json({ url, expiresInSeconds: 60 });
+  } catch (error) { next(error); }
+});
+
+app.get('/api/admin/documents/:id/content', async (req: Request, res: Response) => {
+  const expires = Number(req.query.expires);
+  const actorId = typeof req.query.actor === 'string' ? req.query.actor : '';
+  const signature = typeof req.query.signature === 'string' ? req.query.signature : '';
+  if (!Number.isInteger(expires) || expires < Math.floor(Date.now() / 1000) || expires > Math.floor(Date.now() / 1000) + 90) {
+    return res.status(403).json({ error: 'This document link has expired.' });
+  }
+  if (!actorId) return res.status(403).json({ error: 'Invalid document link.' });
+  const expected = crypto.createHmac('sha256', env.SESSION_SECRET).update(`${req.params.id}:${expires}:${actorId}`).digest();
+  const received = Buffer.from(signature, 'hex');
+  if (received.length !== expected.length || !crypto.timingSafeEqual(received, expected)) return res.status(403).json({ error: 'Invalid document link.' });
+  const document = sqlite.prepare(`SELECT object_key FROM user_documents WHERE id = ? AND deleted_at IS NULL`)
+    .get(req.params.id) as { object_key: string } | undefined;
+  if (!document) return res.status(404).end();
+  db.logAudit({ actorId, actorRole: 'admin', action: 'DOCUMENT_VIEW_REQUESTED', targetType: 'user_document', targetId: req.params.id, ipAddress: req.ip, userAgent: req.headers['user-agent'] });
+  try {
+    const result = await readPrivateDocument(document.object_key);
+    db.logAudit({ actorId, actorRole: 'admin', action: 'DOCUMENT_VIEWED', targetType: 'user_document', targetId: req.params.id, ipAddress: req.ip, userAgent: req.headers['user-agent'] });
+    res.set({ 'Content-Type': result.contentType, 'Cache-Control': 'no-store, private', 'X-Content-Type-Options': 'nosniff', 'Content-Disposition': 'inline' });
+    res.send(result.bytes);
+  } catch { res.status(404).end(); }
+});
+
+app.post('/api/admin/documents/:id/review', requireAdmin, (req: Request, res: Response) => {
+  const status = req.body?.status;
+  const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim().slice(0, 500) : '';
+  if (!['approved', 'rejected'].includes(status) || (status === 'rejected' && reason.length < 3)) {
+    return res.status(400).json({ error: 'Choose approve or reject and provide a reason when rejecting.' });
+  }
+  const document = sqlite.prepare(`SELECT id, user_id, document_type, booking_id FROM user_documents WHERE id = ? AND deleted_at IS NULL`)
+    .get(req.params.id) as { id: string; user_id: string; document_type: string; booking_id: string | null } | undefined;
+  if (!document) return res.status(404).json({ error: 'Document not found.' });
+  const tx = sqlite.transaction(() => {
+    sqlite.prepare(`UPDATE user_documents SET review_status = ?, review_reason = ?, reviewed_by = ? WHERE id = ?`)
+      .run(status, status === 'rejected' ? reason : null, req.admin!.id, document.id);
+    if (status === 'approved' && document.document_type === 'driving_license') {
+      sqlite.prepare('UPDATE users SET driving_licence_verified = 1 WHERE id = ?').run(document.user_id);
+    }
+    if (document.booking_id) {
+      const rejected = sqlite.prepare(`SELECT 1 FROM user_documents WHERE booking_id = ? AND review_status = 'rejected' LIMIT 1`).get(document.booking_id);
+      const pending = sqlite.prepare(`SELECT 1 FROM user_documents WHERE booking_id = ? AND review_status = 'pending' LIMIT 1`).get(document.booking_id);
+      if (rejected) sqlite.prepare(`UPDATE bookings SET booking_status = 'REJECTED', verification_status = 'rejected', cancellation_reason = ?, updated_at = ? WHERE id = ?`).run(reason || 'A required document was rejected.', new Date().toISOString(), document.booking_id);
+      else if (!pending) sqlite.prepare(`UPDATE bookings SET booking_status = 'CONFIRMED', verification_status = 'verified', updated_at = ? WHERE id = ? AND booking_status = 'PENDING_VERIFICATION'`).run(new Date().toISOString(), document.booking_id);
+    }
+  });
+  tx();
+  db.logAudit({ actorId: req.admin!.id, actorRole: 'admin', action: `DOCUMENT_${status.toUpperCase()}`, targetType: 'user_document', targetId: document.id, diff: { reason: status === 'rejected' ? reason : undefined }, ipAddress: req.ip, userAgent: req.headers['user-agent'] });
+  res.json({ success: true, reviewStatus: status });
+});
+
+app.get('/api/admin/listings', requireAdmin, (req: Request, res: Response) => {
+  const statuses = ['APPROVED', 'CHANGES_REQUESTED', 'REJECTED'].includes(String(req.query.status))
+    ? [String(req.query.status)] : ['PENDING_APPROVAL', 'CHANGES_REQUESTED'];
+  const rows = sqlite.prepare(`
+    SELECT b.id, b.owner_id, b.brand, b.model, b.year, b.bike_type, b.fuel_type, b.transmission,
+      b.images, b.hourly_rate_inr, b.daily_rate_inr, b.hub_name, b.registration_masked, b.approval_status,
+      b.admin_notes, b.created_at, u.email
+    FROM bikes b JOIN users u ON u.id = b.owner_id
+    WHERE b.approval_status IN (${statuses.map(() => '?').join(',')})
+    ORDER BY b.created_at ASC LIMIT 200
+  `).all(...statuses) as Array<any>;
+  res.json(rows.map((row) => ({
+    id: row.id,
+    ownerRef: `Owner ${String(row.owner_id).slice(0, 8)}`,
+    ownerEmailMasked: maskEmail(row.email),
+    brand: row.brand,
+    model: row.model,
+    year: row.year,
+    bikeType: row.bike_type,
+    fuelType: row.fuel_type,
+    transmission: row.transmission,
+    images: JSON.parse(row.images || '[]'),
+    hourlyRateInr: row.hourly_rate_inr,
+    dailyRateInr: row.daily_rate_inr,
+    hubName: row.hub_name,
+    registrationMasked: row.registration_masked,
+    status: row.approval_status,
+    adminNotes: row.admin_notes,
+    submittedAt: row.created_at,
+  })));
+});
+
+app.post('/api/admin/listings/:id/review', requireAdmin, (req: Request, res: Response) => {
+  const decision = req.body?.decision;
+  const notes = typeof req.body?.notes === 'string' ? req.body.notes.trim().slice(0, 500) : '';
+  if (!['approved', 'changes_requested', 'rejected'].includes(decision) || (decision !== 'approved' && notes.length < 3)) {
+    return res.status(400).json({ error: 'Choose a listing decision and include review notes for changes or rejection.' });
+  }
+  const bike = sqlite.prepare('SELECT id, owner_id, approval_status FROM bikes WHERE id = ?').get(req.params.id) as { id: string; owner_id: string; approval_status: string } | undefined;
+  if (!bike) return res.status(404).json({ error: 'Listing not found.' });
+  const status = decision === 'approved' ? 'APPROVED' : decision === 'changes_requested' ? 'CHANGES_REQUESTED' : 'REJECTED';
+  sqlite.prepare('UPDATE bikes SET approval_status = ?, availability_status = ?, admin_notes = ?, updated_at = ? WHERE id = ?')
+    .run(status, status === 'APPROVED' ? 'AVAILABLE' : 'UNAVAILABLE', notes || null, new Date().toISOString(), bike.id);
+  db.logAudit({ actorId: req.admin!.id, actorRole: 'admin', action: `LISTING_${status}`, targetType: 'bike', targetId: bike.id, diff: { notes: notes || undefined }, ipAddress: req.ip, userAgent: req.headers['user-agent'] });
+  res.json({ success: true, status, adminNotes: notes || undefined });
+});
 
 // ----------------------------------------------------
 // GEMINI ADVISORY OCR ENDPOINT
 // ----------------------------------------------------
 app.post('/api/verify-document', requireUser, geminiLimiter, async (req: Request, res: Response) => {
   const { documentBase64, mimeType, expectedName, expectedEnrollment, documentCategory } = req.body;
-  if (!documentBase64 || !documentCategory) {
-    return res.status(400).json({ error: 'documentBase64 and documentCategory are required' });
+  if (!documentBase64 || !['driving_license', 'student_id'].includes(documentCategory)) {
+    return res.status(400).json({ error: 'Only driving licence and student ID can be sent for optional advisory analysis.', code: 'UNSUPPORTED_DOCUMENT_CATEGORY' });
   }
 
   try {
@@ -1183,9 +1396,9 @@ app.post('/api/verify-document', requireUser, geminiLimiter, async (req: Request
       mimeType: mimeType || 'image/jpeg',
       expectedName: expectedName || req.user!.fullName,
       expectedEnrollment: expectedEnrollment || req.user!.icfaiEnrollment,
-      documentCategory: documentCategory === 'student_id' ? 'student_id' : 'driving_license',
+      documentCategory,
     });
-    res.json(analysis);
+    res.json({ ...analysis, advisoryOnly: true, manualReviewRequired: true });
   } catch (error: any) {
     res.status(500).json({ error: error?.message || 'Verification processing failed' });
   }

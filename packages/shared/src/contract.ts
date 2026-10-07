@@ -53,8 +53,7 @@ export const PublicBikeDtoSchema = z.object({
   images: z.array(z.string().url().or(z.string().startsWith('/assets/'))),
   features: z.array(z.string()),
   isInstantBooking: z.boolean(),
-  rating: z.number().min(1).max(5),
-  totalTrips: z.number().int().nonnegative(),
+  listedAt: z.string().datetime().optional(),
   conditionNotes: z.string().default('Inspected by Campus Coordinator'),
   // Masked plate for privacy, full plate only visible after booking confirmation
   registrationMasked: z.string(),
@@ -178,8 +177,8 @@ export const BookingCreateSchema = z.object({
   endTime: z.string().datetime(),
   pickupHubId: z.string(),
   depositType: z.enum(['laptop', 'cash_hub']),
-  drivingLicenceImage: z.string().min(10, 'Driving Licence scan is required'),
-  studentIdCardImage: z.string().min(10, 'ICFAI Student ID card photo is required'),
+  documentConsentId: z.string().uuid(),
+  documentIds: z.array(z.string().uuid()).min(2).max(3),
   agreedToTermsVersion: z.string(),
   idempotencyKey: z.string().min(8),
 });
@@ -286,6 +285,8 @@ export const PublicConfigSchema = z.object({
   enrollmentFormatExample: z.string(),
   termsVersion: z.string(),
   privacyVersion: z.string(),
+  requireAadhaarUpload: z.boolean(),
+  documentConsentVersion: z.string(),
   depositPolicy: z.object({
     modes: z.array(z.object({ id: z.string(), label: z.string(), description: z.string() })),
     standardAmountInr: z.number().nonnegative(),

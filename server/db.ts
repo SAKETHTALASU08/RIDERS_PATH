@@ -167,6 +167,40 @@ export function runMigrations() {
       created_at TEXT NOT NULL
     );
 
+    -- Document contents live in private storage. SQLite contains metadata only.
+    CREATE TABLE IF NOT EXISTS document_consents (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      version TEXT NOT NULL,
+      accepted_at TEXT NOT NULL,
+      ip_address TEXT,
+      user_agent TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS user_documents (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      consent_id TEXT NOT NULL REFERENCES document_consents(id),
+      document_type TEXT NOT NULL CHECK (document_type IN ('driving_license', 'student_id', 'aadhaar')),
+      object_key TEXT NOT NULL,
+      storage_driver TEXT NOT NULL,
+      mime_type TEXT NOT NULL,
+      byte_size INTEGER NOT NULL,
+      review_status TEXT NOT NULL DEFAULT 'pending' CHECK (review_status IN ('pending', 'approved', 'rejected')),
+      review_reason TEXT,
+      reviewed_by TEXT,
+      booking_id TEXT REFERENCES bookings(id),
+      uploaded_at TEXT NOT NULL,
+      deleted_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS bike_favorites (
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      bike_id TEXT NOT NULL REFERENCES bikes(id) ON DELETE CASCADE,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (user_id, bike_id)
+    );
+
     CREATE TABLE IF NOT EXISTS audit_logs (
       id TEXT PRIMARY KEY,
       actor_id TEXT NOT NULL,
@@ -194,6 +228,10 @@ export function runMigrations() {
     CREATE INDEX IF NOT EXISTS idx_otp_email_expires ON otp_codes (email, expires_at);
     CREATE INDEX IF NOT EXISTS idx_otp_send_logs_email ON otp_send_logs (email, created_at);
     CREATE INDEX IF NOT EXISTS idx_otp_send_logs_ip ON otp_send_logs (ip_address, created_at);
+    CREATE INDEX IF NOT EXISTS idx_user_documents_user ON user_documents(user_id, uploaded_at);
+    CREATE INDEX IF NOT EXISTS idx_user_documents_review ON user_documents(review_status, uploaded_at);
+    CREATE INDEX IF NOT EXISTS idx_user_documents_retention ON user_documents(booking_id, uploaded_at, deleted_at);
+    CREATE INDEX IF NOT EXISTS idx_bike_favorites_user ON bike_favorites(user_id, created_at DESC);
   `);
 
   // Earlier versions stored raw addresses in send-limit records. Keep only SHA-256 keys.
@@ -1121,8 +1159,9 @@ export const db = {
     depositInr: number;
     depositType: string;
     totalPayableInr: number;
-    drivingLicenseDocPath?: string;
-    studentIdDocPath?: string;
+    documentConsentId: string;
+    documentIds: string[];
+    requireAadhaar: boolean;
     agreedTermsVersion: string;
     idempotencyKey?: string;
   }) {
@@ -1133,8 +1172,25 @@ export const db = {
           .prepare('SELECT * FROM bookings WHERE idempotency_key = ?')
           .get(data.idempotencyKey) as any;
         if (existing) {
+          if (existing.renter_id !== data.renterId) throw new Error('IDEMPOTENCY_KEY_CONFLICT');
           return this.mapBookingRow(existing);
         }
+      }
+
+      const requiredTypes = data.requireAadhaar
+        ? ['driving_license', 'student_id', 'aadhaar']
+        : ['driving_license', 'student_id'];
+      const consent = sqlite.prepare('SELECT id FROM document_consents WHERE id = ? AND user_id = ?')
+        .get(data.documentConsentId, data.renterId);
+      if (!consent || new Set(data.documentIds).size !== requiredTypes.length) {
+        throw new Error('DOCUMENT_CONSENT_OR_DOCUMENTS_INVALID');
+      }
+      const documents = data.documentIds.map((documentId) => sqlite.prepare(`
+        SELECT id, document_type FROM user_documents
+        WHERE id = ? AND user_id = ? AND consent_id = ? AND review_status = 'pending' AND deleted_at IS NULL AND booking_id IS NULL
+      `).get(documentId, data.renterId, data.documentConsentId) as { id: string; document_type: string } | undefined);
+      if (documents.some((document) => !document) || requiredTypes.some((type) => !documents.some((document) => document?.document_type === type))) {
+        throw new Error('DOCUMENTS_REQUIRED');
       }
 
       // 2. Overlap check with table lock inside transaction
@@ -1168,7 +1224,7 @@ export const db = {
             idempotency_key, created_at, updated_at
           ) VALUES (
             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-            'CONFIRMED', 'verified', 'pending', ?, ?, ?, ?, ?, ?, ?, ?
+            'PENDING_VERIFICATION', 'pending', 'pending', ?, ?, NULL, NULL, ?, ?, ?, ?
           )
         `)
         .run(
@@ -1191,13 +1247,19 @@ export const db = {
           data.totalPayableInr,
           handoverCode,
           qrPassCode,
-          data.drivingLicenseDocPath || null,
-          data.studentIdDocPath || null,
           data.agreedTermsVersion,
           data.idempotencyKey || null,
           now,
           now
         );
+
+      const attachDocument = sqlite.prepare(`
+        UPDATE user_documents SET booking_id = ?
+        WHERE id = ? AND user_id = ? AND booking_id IS NULL AND deleted_at IS NULL
+      `);
+      for (const documentId of data.documentIds) {
+        if (attachDocument.run(id, documentId, data.renterId).changes !== 1) throw new Error('DOCUMENTS_REQUIRED');
+      }
 
       return this.getBookingById(id);
     });
@@ -1245,10 +1307,8 @@ export const db = {
       handoverCode: row.handover_code,
       qrPassCode: row.qr_pass_code,
       depositType: row.deposit_type,
-      drivingLicenseDocPath: row.driving_license_doc_path,
-      studentIdDocPath: row.student_id_doc_path,
       createdAt: row.created_at,
-      cancellationReason: row.cancellation_reason,
+      ...(row.cancellation_reason ? { cancellationReason: row.cancellation_reason } : {}),
     };
   },
 

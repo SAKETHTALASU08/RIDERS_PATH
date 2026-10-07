@@ -22,6 +22,8 @@ describe('Passwordless Email-OTP Authentication & Security Tests', () => {
     sqlite.prepare('DELETE FROM sessions').run();
     sqlite.prepare('DELETE FROM manual_verification_requests').run();
     sqlite.prepare('DELETE FROM verifications').run();
+    sqlite.prepare('DELETE FROM user_documents').run();
+    sqlite.prepare('DELETE FROM document_consents').run();
     sqlite.prepare('DELETE FROM bookings').run();
     sqlite.prepare("DELETE FROM users WHERE id NOT IN ('usr_system_admin', 'usr_owner_student_01')").run();
 
@@ -620,7 +622,7 @@ describe('Passwordless Email-OTP Authentication & Security Tests', () => {
       expect(owner.body.code).toBe('EMAIL_VERIFICATION_REQUIRED');
     });
 
-    it('requires an admin-approved driving licence before booking', async () => {
+    it('requires consent and current required documents before booking', async () => {
       const user = db.createUser({
         email: 'licence.pending@student.example.edu',
         emailVerified: 1,
@@ -633,10 +635,18 @@ describe('Passwordless Email-OTP Authentication & Security Tests', () => {
       const res = await request(app)
         .post('/api/bookings')
         .set('Cookie', [`${STUDENT_SESSION_COOKIE}=${token}`])
-        .send({});
+        .send({
+          bikeId: 'bike-ather-450x',
+          startTime: new Date(Date.now() + 24 * 3600 * 1000).toISOString(),
+          endTime: new Date(Date.now() + 28 * 3600 * 1000).toISOString(),
+          pickupHubId: 'hub_main_gate', depositType: 'laptop',
+          documentConsentId: crypto.randomUUID(),
+          documentIds: Array.from({ length: 3 }, () => crypto.randomUUID()),
+          agreedToTermsVersion: 'terms-placeholder-v1', idempotencyKey: 'docs-required-test-01',
+        });
 
-      expect(res.status).toBe(403);
-      expect(res.body.code).toBe('LICENCE_VERIFICATION_REQUIRED');
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('DOCUMENTS_REQUIRED');
     });
 
     it('rejects owner onboarding if student has not completed profile', async () => {

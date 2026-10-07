@@ -24,4 +24,25 @@ describe('Browser CSRF protection', () => {
     expect(acceptedByCsrf.status).toBe(200);
     expect(acceptedByCsrf.body.success).toBe(true);
   });
+
+  it('keeps admin and student CSRF tokens independent across the shared API origin', async () => {
+    const browser = request.agent(app);
+    const studentToken = (await browser.get('/api/csrf-token')).body.csrfToken as string;
+    const adminTokenResponse = await browser.get('/api/admin/csrf-token');
+    const adminToken = adminTokenResponse.body.csrfToken as string;
+    expect(adminTokenResponse.headers['set-cookie']?.join(';')).toContain('rp_admin_csrf_token=');
+
+    const adminLogin = await browser
+      .post('/api/admin/login')
+      .set('Origin', 'http://localhost:5174')
+      .set('X-CSRF-Token', adminToken)
+      .send({ username: 'invalid', password: 'invalid' });
+    expect(adminLogin.status).not.toBe(403);
+
+    const studentLogout = await browser
+      .post('/api/auth/logout')
+      .set('Origin', 'http://localhost:5173')
+      .set('X-CSRF-Token', studentToken);
+    expect(studentLogout.status).toBe(200);
+  });
 });

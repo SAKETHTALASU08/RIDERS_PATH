@@ -4,18 +4,35 @@ import crypto from 'crypto';
 import { app } from '../../server';
 import { db, sqlite } from '../db';
 import { STUDENT_SESSION_COOKIE, ADMIN_SESSION_COOKIE } from '../middleware/auth';
+import { env } from '../config/env';
 
 describe('Backend Security & Authorization Integration Tests', () => {
   let student1Token: string;
   let student2Token: string;
   let student1Id: string;
   let student2Id: string;
-  let adminToken: string;
   let bikeId: string = 'bike-ather-450x';
   let createdBookingId: string;
 
+  function addDocumentsForUser(userId: string) {
+    const consentId = crypto.randomUUID();
+    sqlite.prepare(`INSERT INTO document_consents (id,user_id,version,accepted_at) VALUES (?,?,?,?)`)
+      .run(consentId, userId, env.DOCUMENT_CONSENT_VERSION, new Date().toISOString());
+    const types = env.REQUIRE_AADHAAR_UPLOAD ? ['driving_license', 'student_id', 'aadhaar'] : ['driving_license', 'student_id'];
+    const documentIds = types.map((documentType) => {
+      const id = crypto.randomUUID();
+      sqlite.prepare(`INSERT INTO user_documents (id,user_id,consent_id,document_type,object_key,storage_driver,mime_type,byte_size,uploaded_at) VALUES (?,?,?,?,?,?,?,?,?)`)
+        .run(id, userId, consentId, documentType, `${id}.enc`, 'local', 'image/jpeg', 100, new Date().toISOString());
+      return id;
+    });
+    return { documentConsentId: consentId, documentIds };
+  }
+
   beforeAll(async () => {
     // Reset test artifacts in SQLite to ensure repeatable hermetic test execution
+    sqlite.prepare('DELETE FROM user_documents').run();
+    sqlite.prepare('DELETE FROM document_consents').run();
+    sqlite.prepare('DELETE FROM bike_favorites').run();
     sqlite.prepare('DELETE FROM bookings').run();
     sqlite.prepare("DELETE FROM users WHERE id NOT IN ('usr_system_admin', 'usr_owner_student_01')").run();
     sqlite.prepare('DELETE FROM sessions').run();
@@ -38,10 +55,6 @@ describe('Backend Security & Authorization Integration Tests', () => {
     db.createSession(student2Token, student2Id, 'student');
 
     // 3. Authenticate Admin
-    const adminRes = await request(app)
-      .post('/api/admin/login')
-      .send({ password: 'admin123!Safe' });
-    adminToken = adminRes.body.token;
   });
 
   // 1. Unauthenticated requests to bookings and admin routes return 401/403
@@ -62,6 +75,27 @@ describe('Backend Security & Authorization Integration Tests', () => {
       .get('/api/bikes/all')
       .set('Cookie', [`${ADMIN_SESSION_COOKIE}=${student1Token}`]);
     expect(res.status).toBe(403);
+  });
+
+  it('keeps saved bike lists private to each student session', async () => {
+    const first = await request(app)
+      .put(`/api/favorites/${bikeId}`)
+      .set('Cookie', [`${STUDENT_SESSION_COOKIE}=${student1Token}`]);
+    expect(first.status).toBe(200);
+
+    const ownFavorites = await request(app)
+      .get('/api/favorites')
+      .set('Cookie', [`${STUDENT_SESSION_COOKIE}=${student1Token}`]);
+    const otherFavorites = await request(app)
+      .get('/api/favorites')
+      .set('Cookie', [`${STUDENT_SESSION_COOKIE}=${student2Token}`]);
+    expect(ownFavorites.body).toEqual([bikeId]);
+    expect(otherFavorites.body).toEqual([]);
+
+    const remove = await request(app)
+      .delete(`/api/favorites/${bikeId}`)
+      .set('Cookie', [`${STUDENT_SESSION_COOKIE}=${student1Token}`]);
+    expect(remove.status).toBe(200);
   });
 
   // 3. Availability and public bike responses contain no personal data or private fields
@@ -102,8 +136,7 @@ describe('Backend Security & Authorization Integration Tests', () => {
       endTime,
       pickupHubId: 'hub_block_c',
       depositType: 'laptop',
-      drivingLicenceImage: '/uploads/dl_valid.jpg',
-      studentIdCardImage: '/uploads/student_valid.jpg',
+      ...addDocumentsForUser(student1Id),
       agreedToTermsVersion: 'v2.1-campus-2026',
       idempotencyKey: 'idemp_test_' + Math.random().toString(36).substring(2, 9),
       // Attempted client manipulation:
@@ -125,6 +158,9 @@ describe('Backend Security & Authorization Integration Tests', () => {
     expect(res.body.pricing.rentalChargeInr).toBe(260);
     expect(res.body.pricing.totalPayableAtHandoverInr).toBe(281);
     expect(res.body.pricing.isServerCalculated).toBe(true);
+    expect(res.body.drivingLicenseDocPath).toBeUndefined();
+    expect(res.body.studentIdDocPath).toBeUndefined();
+    expect(res.body.status).toBe('PENDING_VERIFICATION');
   });
 
   // 5. A student cannot read another student's booking
@@ -184,8 +220,7 @@ describe('Backend Security & Authorization Integration Tests', () => {
       endTime: conflictEnd,
       pickupHubId: 'hub_main_gate',
       depositType: 'laptop',
-      drivingLicenceImage: '/uploads/dl.jpg',
-      studentIdCardImage: '/uploads/id.jpg',
+      ...addDocumentsForUser(student1Id),
       agreedToTermsVersion: 'v2.1',
       idempotencyKey: 'idemp_race_a_' + Math.random().toString(36).substring(2, 9),
     };
@@ -196,8 +231,7 @@ describe('Backend Security & Authorization Integration Tests', () => {
       endTime: conflictEnd,
       pickupHubId: 'hub_main_gate',
       depositType: 'cash_hub',
-      drivingLicenceImage: '/uploads/dl.jpg',
-      studentIdCardImage: '/uploads/id.jpg',
+      ...addDocumentsForUser(student2Id),
       agreedToTermsVersion: 'v2.1',
       idempotencyKey: 'idemp_race_b_' + Math.random().toString(36).substring(2, 9),
     };
