@@ -132,7 +132,7 @@ export const INITIAL_MOCK_BIKES: PublicBikeDto[] = [
     isInstantBooking: true,
     rating: 4.75,
     totalTrips: 53,
-    conditionNotes: 'Excellent tire tread, verified campus coordinator check',
+    conditionNotes: 'Owner notes: tire tread condition reported as good',
     registrationMasked: 'TS08-****',
   },
 ];
