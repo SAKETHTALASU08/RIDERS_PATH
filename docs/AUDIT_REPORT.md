@@ -96,7 +96,7 @@
 
 ### Assumptions & Configuration (`src/config/platform.config.ts`)
 - **Institution**: ICFAI Foundation for Higher Education (IFHE), Hyderabad.
-- **Allowed Email Domain**: `@icfaiuniversity.in` (configurable in `platform.config.ts`).
-- **Student Enrollment Number Format**: Regex `^[0-9]{2}[A-Z]{2,4}[0-9]{3,5}$` (e.g. `21BSPH0102`).
+- **Allowed Email Domains**: unset in the repository; configure the actual domain(s) with `ALLOWED_EMAIL_DOMAINS`. OTP requests fail closed until configured.
+- **Student Enrollment Number Format**: configurable with `ENROLLMENT_FORMAT_REGEX`; the permissive default is a documented placeholder, not an official format.
 - **Security Deposit**: Refundable security deposit (laptop or hub deposit) held during rental; payment is offline *"Pay at Handover"*.
 - **Required Documents**: Valid Indian Driving Licence (Two-Wheeler) + Physical ICFAI Student ID Card. NO Aadhaar.

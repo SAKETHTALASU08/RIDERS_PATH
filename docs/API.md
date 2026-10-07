@@ -8,7 +8,7 @@ This document provides a comprehensive technical catalog of all HTTP API endpoin
 
 ### 1.1 Session Storage & Cookies
 - **Student Sessions (`rp_student_session`)**:
-  - Issued upon successful email OTP verification or development login.
+  - Issued only upon successful student email OTP verification.
   - Stored as cryptographically random 256-bit hex tokens (`crypto.randomBytes(32)`).
   - Stored in SQLite as SHA-256 hashes (`sessions` table) to prevent token theft from database backups.
   - Delivered via `httpOnly`, `SameSite=Lax`, and `Secure` (production) cookies with 7-day expiration.
@@ -23,10 +23,10 @@ This document provides a comprehensive technical catalog of all HTTP API endpoin
 - **CSRF Verification**: State-changing requests (`POST`, `PUT`, `DELETE`, `PATCH`) require matching `Origin` or `Referer` headers when called with browser credentials.
 - **Tiered Rate Limiting (`express-rate-limit`)**:
   - Global API: 300 requests / 15 minutes per IP.
-  - Authentication (`/api/auth/*`, `/api/admin/login`): 10 requests / 15 minutes per IP.
-  - OTP Dispatch (`/api/auth/otp/request`): 3 requests / 5 minutes per IP.
-  - Booking Creation (`POST /api/bookings`): 10 requests / 15 minutes per student.
-  - Document Uploads & Gemini AI: 5 requests / 15 minutes per IP.
+  - Authentication, OTP verification, and manual-verification requests: 15 requests / 15 minutes per IP.
+  - OTP sending uses durable SQLite limits: per-email cooldown and hourly cap, plus a per-IP hourly cap.
+  - Booking Creation (`POST /api/bookings`): 20 requests / hour per IP.
+  - Owner onboarding: 10 requests / hour per IP. Gemini advisory checks: 15 requests / hour per IP.
 - **Payload Limits**: JSON and URL-encoded bodies capped at 100 KB. Multipart uploads capped at 5 MB across max 2 files.
 - **Magic-Byte MIME Validation**: Multer disk storage validates actual file headers (JPEG `FF D8 FF`, PNG `89 50 4E 47`, WebP `52 49 46 46`), instantly deleting disguised executables or scripts.
 
@@ -61,7 +61,10 @@ Returns safe, non-sensitive platform configurations (campus hubs, email domain, 
 ```json
 {
   "campusName": "ICFAI Foundation for Higher Education, Hyderabad",
-  "allowedEmailDomain": "icfaiuniversity.in",
+  "allowedEmailDomain": null,
+  "allowedEmailDomains": [],
+  "enrollmentFormatRegex": "^[A-Za-z0-9-]{4,20}$",
+  "enrollmentFormatExample": "ABCD-123 (placeholder)",
   "hubs": [
     {
       "id": "hub_main_gate",
@@ -84,92 +87,84 @@ Returns safe, non-sensitive platform configurations (campus hubs, email domain, 
 ### 2.2 Authentication & User Profile
 
 #### `POST /api/auth/otp/request`
-Requests a 6-digit numeric OTP sent to an official ICFAI email address.
-- **Auth**: Public (Rate-limited: 3 req / 5 min)
+Requests a 6-digit numeric OTP. The allowlist is configured with `ALLOWED_EMAIL_DOMAINS`; the server fails closed when it is unset.
+- **Auth**: Public (durable SQLite caps: cooldown, per-email hourly, and per-IP hourly)
 - **Request Body**:
 ```json
 {
-  "email": "student@icfaiuniversity.in"
+  "email": "student@example.edu"
 }
 ```
 - **Response `200 OK`**:
 ```json
 {
   "success": true,
-  "message": "A 6-digit verification code has been dispatched to student@icfaiuniversity.in."
+  "message": "If this is a valid campus email address, a verification code has been dispatched.",
+  "cooldownSeconds": 60
 }
 ```
-*(Uniform response returned whether the user already exists or not to prevent account enumeration attacks).*
+The same success body is returned for allowed and disallowed addresses and regardless of whether a user record exists. A send-limit response uses HTTP `429` with a generic message and server-provided `retryAfterSeconds`. SMTP delivery failures also return the generic success body and delete the unsent code. If domains are not configured, the endpoint returns a generic `503` and no email is sent.
 
 #### `POST /api/auth/otp/verify`
-Verifies the 6-digit code and establishes an httpOnly session.
+Verifies a single-use 6-digit code using a constant-time HMAC comparison and establishes a new httpOnly session.
 - **Auth**: Public
 - **Request Body**:
 ```json
 {
-  "email": "student@icfaiuniversity.in",
+  "email": "student@example.edu",
   "code": "123456"
 }
 ```
 - **Set-Cookie**: `rp_student_session=<token>; HttpOnly; SameSite=Lax; Path=/; Max-Age=604800`
-- **Response `200 OK`**:
+- **Response `200 OK`** (no session token in the body):
 ```json
 {
-  "requiresProfileCompletion": false,
+  "requiresProfileCompletion": true,
   "user": {
-    "id": "usr_94bca28014",
-    "name": "Suhash Reddy",
-    "email": "suhash.reddy@icfaiuniversity.in",
-    "phone": "+91 98480 11223",
-    "enrollmentNumber": "21BSPH0101",
-    "course": "B.Tech CSE",
-    "year": "3rd Year",
-    "isVerified": true,
+    "id": "usr_example",
+    "name": "",
+    "email": "student@example.edu",
+    "phone": "",
+    "enrollmentNumber": "",
+    "course": "",
+    "year": "1st Year",
+    "isVerified": false,
+    "emailVerified": true,
+    "profileComplete": false,
+    "drivingLicenceVerified": false,
+    "studentIdVerified": false,
     "createdAt": "2026-10-04T10:00:00.000Z"
   }
 }
 ```
-
-#### `POST /api/auth/dev-login`
-Development-only login bypass helper. **Permanently disabled and returns 404 when `NODE_ENV=production`**.
-- **Auth**: Public (Dev/Test only)
-- **Request Body**:
-```json
-{
-  "enrollment": "21BSPH0101",
-  "email": "student@icfaiuniversity.in",
-  "fullName": "Suhash Reddy"
-}
-```
-- **Response `200 OK`**:
-```json
-{
-  "success": true,
-  "token": "a1f9408e...",
-  "user": { ... }
-}
-```
+Invalid, expired, reused, and locked codes return generic code errors. After `OTP_MAX_ATTEMPTS` failures the code is invalidated.
 
 #### `GET /api/auth/me`
 Retrieves currently authenticated student's profile.
 - **Auth**: Student Session Cookie
-- **Response `200 OK`**: User profile object
+- **Response `200 OK`**: `UserProfile` contract, including `createdAt`, `emailVerified`, `profileComplete`, `drivingLicenceVerified`, and `studentIdVerified`.
 - **Errors**: `401 Unauthorized` if session is missing, invalid, or expired.
 
-#### `PUT /api/auth/profile`
-Updates profile information with strict validation. Rejects mass-assignment of `role`, `id`, `passwordHash`, or admin flags.
-- **Auth**: Student Session Cookie
+#### `PUT /api/users/me/profile`
+Completes the authenticated, email-verified student's profile. Full name, enrollment number, Indian mobile number, course, and academic year are validated; enrollment uses the configured shared validator and is unique across users.
+- **Auth**: Student Session Cookie and verified email
 - **Request Body**:
 ```json
 {
-  "name": "Suhash Reddy",
-  "enrollmentNumber": "21BSPH0101",
+  "name": "Student Name",
+  "enrollmentNumber": "ABCD-123",
   "phone": "9848011223",
   "course": "B.Tech CSE",
   "year": "3rd Year"
 }
 ```
 - **Response `200 OK`**: Updated profile object.
+- **Errors**: `409 ENROLLMENT_CONFLICT` does not disclose the other account.
+
+#### `POST /api/auth/manual-verification-request`
+Creates a pending request for students who cannot access their campus email. It is rate-limited and does not require or create a session.
+- **Request Body**: `name`, `enrollmentNumber`, `alternateEmail`, and optional `note` (up to 500 characters).
+- **Response `201 Created`**: Generic receipt and request ID. No access is granted; admin review UI is out of scope for this phase.
 
 #### `POST /api/auth/logout`
 Destroys session in database and clears the session cookie.
@@ -182,7 +177,7 @@ Destroys session in database and clears the session cookie.
 
 #### `POST /api/admin/login`
 Authenticates campus fleet staff using bcrypt salted password verification.
-- **Auth**: Public (Strictly rate-limited: 10 req / 15 min)
+- **Auth**: Public (Strictly rate-limited: 15 req / 15 min)
 - **Request Body**:
 ```json
 {
@@ -277,12 +272,13 @@ Calculates authoritative, tamper-proof rental charges and platform fees.
 
 #### `POST /api/bookings`
 Reserves a bike for a campus student.
-- **Auth**: Student Session Cookie (Rate-limited: 10 req / 15 min)
+- **Auth**: Student Session Cookie (Rate-limited: 20 req / hour per IP)
 - **Concurrency & Integrity**:
   - Computes pricing and duration strictly on the server from timestamps; client duration and price fields are discarded.
   - Executes inside an atomic SQLite transaction with an overlap check.
   - Idempotency key prevents double submissions.
   - Active reservation cap of 3 bookings per student.
+  - Requires an email-verified user with a complete profile and an admin-approved driving licence.
 - **Request Body**:
 ```json
 {
@@ -333,8 +329,8 @@ Cancels an unconfirmed or active booking.
 
 #### `POST /api/owner/onboard`
 Submits a student's personal two-wheeler for campus peer-rental listing.
-- **Auth**: Student Session Cookie (Rate-limited: 5 req / 15 min)
-- **Security**: The listing is initially marked `PENDING_APPROVAL` with `availabilityStatus: "UNAVAILABLE"`. Public users cannot view or book it until verified and approved by campus fleet admin. The user's role is updated to `owner` safely without granting admin permissions.
+- **Auth**: Student Session Cookie (Rate-limited: 10 req / hour per IP)
+- **Security**: Requires a verified email and complete profile. The listing is initially marked `PENDING_APPROVAL`; public users cannot view or book it until approved by campus fleet admin.
 - **Request Body**: `OwnerOnboardingSchema` (brand, model, year, rates, images, RC document, insurance document, payout UPI ID).
 - **Response `201 Created`**: New bike record.
 
@@ -369,7 +365,7 @@ Secure multipart file upload for Driving Licence and Student ID scans.
 
 #### `POST /api/verify-document`
 Submits uploaded document to Gemini Vision AI for advisory pre-validation.
-- **Auth**: Student Session Cookie (Rate-limited: 5 req / 15 min)
+- **Auth**: Student Session Cookie (Rate-limited: 15 req / hour per IP)
 - **Security Controls**:
   - System prompt instructs AI to ignore any malicious instructions inside images (prompt injection defense).
   - AI output is structured and schema-validated.

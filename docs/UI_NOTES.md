@@ -52,23 +52,18 @@ Defined in `src/styles/index.css` with dark theme default and light theme readin
 
 ---
 
-## 3. Switching Between Mock API and Real Backend
+## 3. API Mode
 
 The API client (`src/api/client.ts`) centralizes all network operations. Components **never** call `fetch()` directly.
 
 ### Configuration via Environment Variables
 
-To use the **Mock Layer** (enabled by default for development and testing):
+The real backend is the default. Same-origin requests use `/api`; set `VITE_API_URL` when the backend is hosted separately.
+
+To use the **Mock Layer** for an explicit demo:
 ```bash
 # In .env or shell:
 VITE_USE_MOCK_API=true
-```
-
-To switch to the **Hardened Real Backend**:
-```bash
-# In .env or production environment:
-VITE_USE_MOCK_API=false
-VITE_API_URL=https://your-hardened-backend.railway.app/api
 ```
 
 ### Security & Authentication Protocol
@@ -82,8 +77,8 @@ VITE_API_URL=https://your-hardened-backend.railway.app/api
 ## 4. Key Assumptions & Config (`src/config/platform.config.ts`)
 
 1. **Campus**: ICFAI Foundation for Higher Education (IFHE), Hyderabad.
-2. **Allowed Email Domain**: `@icfaiuniversity.in` (configurable in `platform.config.ts`).
-3. **Enrollment Number Format**: RegEx `^[0-9]{2}[A-Za-z]{2,4}[0-9]{3,6}$` (e.g. `21BSPH0412`).
+2. **Allowed Email Domains**: supplied by `/api/config` from `ALLOWED_EMAIL_DOMAINS`; no domain is hardcoded in the client.
+3. **Enrollment Number Format**: supplied by `/api/config` and validated through the shared validator. The permissive default is a placeholder until the official format is provided.
 4. **Deposit Options**:
    - Laptop deposit (physical working laptop handed to coordinator at key pickup).
    - Cash hub deposit (₹1,500 refundable security deposit).
