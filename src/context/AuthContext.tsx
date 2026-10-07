@@ -9,9 +9,10 @@ interface AuthContextType {
   isAuthModalOpen: boolean;
   openAuthModal: () => void;
   closeAuthModal: () => void;
-  requestOtp: (email: string) => Promise<{ success: boolean; message: string }>;
+  requestOtp: (email: string) => Promise<{ success: boolean; message: string; cooldownSeconds?: number }>;
   verifyOtp: (email: string, code: string) => Promise<{ requiresProfileCompletion: boolean }>;
   completeProfile: (data: ProfileCompletion) => Promise<void>;
+  submitManualVerification: (data: { name: string; enrollmentNumber: string; alternateEmail: string; note?: string }) => Promise<{ success: boolean; message: string }>;
   logout: () => Promise<void>;
   refreshUser: () => Promise<void>;
 }
@@ -58,6 +59,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setUser(updated);
     toast.success('Profile created successfully!', 'Your student account is active.');
     setIsAuthModalOpen(false);
+  };
+
+  const submitManualVerification = async (data: { name: string; enrollmentNumber: string; alternateEmail: string; note?: string }) => {
+    const res = await apiClient.submitManualVerification(data);
+    toast.info('Verification Submitted', 'A campus coordinator will verify your student ID manually.');
+    return res;
   };
 
   const logout = async () => {

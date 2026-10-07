@@ -32,7 +32,7 @@ export const LandingPage: React.FC = () => {
     {
       step: '02',
       title: 'Digital Clearance',
-      desc: 'Sign in with your ICFAI email and upload your Driving Licence & Student ID. Transparent server-computed pricing.',
+      desc: 'Sign in with your campus email and upload your Driving Licence & Student ID. Transparent server-computed pricing.',
       icon: <ShieldCheck className="w-5 h-5 text-amber-400" />,
     },
     {
@@ -65,7 +65,7 @@ export const LandingPage: React.FC = () => {
   const faqs = [
     {
       q: 'Who can rent bikes on Riders Path?',
-      a: `Any active student of ${PLATFORM_CONFIG.campusName} holding a valid university student email (@${PLATFORM_CONFIG.allowedEmailDomain}) and a valid Indian Driving Licence (Two-Wheeler).`,
+      a: `Any active student of ${PLATFORM_CONFIG.campusName} with an approved campus email and a valid Indian Driving Licence (Two-Wheeler).`,
     },
     {
       q: 'What are the security deposit options?',

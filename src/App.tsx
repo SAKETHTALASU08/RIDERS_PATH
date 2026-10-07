@@ -1,5 +1,5 @@
 import React, { Suspense, lazy } from 'react';
-import { BrowserRouter, Routes, Route } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, useLocation } from 'react-router-dom';
 import { ToastProvider } from './components/ui/Toast';
 import { AuthProvider } from './context/AuthContext';
 import { Navbar } from './components/layout/Navbar';
@@ -41,6 +41,9 @@ const SafetyPage = lazy(() =>
 const NotFoundPage = lazy(() =>
   import('./pages/StaticPages').then((m) => ({ default: m.NotFoundPage }))
 );
+const SignInPage = lazy(() =>
+  import('./pages/SignInPage').then((m) => ({ default: m.SignInPage }))
+);
 
 const PageLoadingFallback: React.FC = () => (
   <div className="max-w-7xl mx-auto px-4 sm:px-6 py-12 w-full flex flex-col gap-6">
@@ -54,41 +57,55 @@ const PageLoadingFallback: React.FC = () => (
   </div>
 );
 
-export const App: React.FC = () => {
+const AppRoutes: React.FC = () => {
+  const location = useLocation();
+  const backgroundLocation = (location.state as { backgroundLocation?: ReturnType<typeof useLocation> } | null)
+    ?.backgroundLocation;
+
   return (
-    <BrowserRouter>
-      <ToastProvider>
-        <AuthProvider>
-          <div className="min-h-screen flex flex-col bg-neutral-950 text-neutral-100 selection:bg-amber-500 selection:text-neutral-950">
-            <Navbar />
+    <ToastProvider>
+      <AuthProvider>
+        <div className="min-h-screen flex flex-col bg-neutral-950 text-neutral-100 selection:bg-amber-500 selection:text-neutral-950">
+          <Navbar />
 
-            <main className="flex-1 flex flex-col">
-              <Suspense fallback={<PageLoadingFallback />}>
+          <main className="flex-1 flex flex-col">
+            <Suspense fallback={<PageLoadingFallback />}>
+              <Routes location={backgroundLocation || location}>
+                <Route path="/" element={<LandingPage />} />
+                <Route path="/browse" element={<BrowseBikesPage />} />
+                <Route path="/bikes/:id" element={<BikeDetailPage />} />
+                <Route path="/book/:id" element={<BookingFlowPage />} />
+                <Route path="/my-bookings" element={<MyBookingsPage />} />
+                <Route path="/owner" element={<OwnerOnboardPage />} />
+                <Route path="/signin" element={<SignInPage />} />
+                <Route path="/how-it-works" element={<LandingPage />} />
+                <Route path="/terms" element={<TermsPage />} />
+                <Route path="/privacy" element={<PrivacyPage />} />
+                <Route path="/refund-policy" element={<RefundPolicyPage />} />
+                <Route path="/safety" element={<SafetyPage />} />
+                <Route path="/faq" element={<LandingPage />} />
+                <Route path="*" element={<NotFoundPage />} />
+              </Routes>
+              {backgroundLocation && (
                 <Routes>
-                  <Route path="/" element={<LandingPage />} />
-                  <Route path="/browse" element={<BrowseBikesPage />} />
-                  <Route path="/bikes/:id" element={<BikeDetailPage />} />
-                  <Route path="/book/:id" element={<BookingFlowPage />} />
-                  <Route path="/my-bookings" element={<MyBookingsPage />} />
-                  <Route path="/owner" element={<OwnerOnboardPage />} />
-                  <Route path="/how-it-works" element={<LandingPage />} />
-                  <Route path="/terms" element={<TermsPage />} />
-                  <Route path="/privacy" element={<PrivacyPage />} />
-                  <Route path="/refund-policy" element={<RefundPolicyPage />} />
-                  <Route path="/safety" element={<SafetyPage />} />
-                  <Route path="/faq" element={<LandingPage />} />
-                  <Route path="*" element={<NotFoundPage />} />
+                  <Route path="/signin" element={<SignInPage />} />
                 </Routes>
-              </Suspense>
-            </main>
+              )}
+            </Suspense>
+          </main>
 
-            <Footer />
-            <AuthModal />
-          </div>
-        </AuthProvider>
-      </ToastProvider>
-    </BrowserRouter>
+          <Footer />
+          <AuthModal />
+        </div>
+      </AuthProvider>
+    </ToastProvider>
   );
 };
+
+export const App: React.FC = () => (
+  <BrowserRouter>
+    <AppRoutes />
+  </BrowserRouter>
+);
 
 export default App;

@@ -87,7 +87,7 @@ export const OwnerOnboardPage: React.FC = () => {
     e.preventDefault();
     setFormError('');
 
-    if (!user) {
+    if (!user || !user.emailVerified || !user.profileComplete) {
       openAuthModal();
       return;
     }

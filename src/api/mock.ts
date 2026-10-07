@@ -11,6 +11,7 @@ import {
   ApiErrorShape,
 } from '../shared/contract';
 import { PLATFORM_CONFIG } from '../config/platform.config';
+import { DEFAULT_ENROLLMENT_EXAMPLE, DEFAULT_ENROLLMENT_REGEX } from '../shared/validators';
 import {
   INITIAL_MOCK_BIKES,
   INITIAL_MOCK_BOOKINGS,
@@ -44,7 +45,13 @@ class MockApiService {
   // 1. Get Platform Config
   async getConfig() {
     await this.delay(50);
-    return PLATFORM_CONFIG;
+    return {
+      ...PLATFORM_CONFIG,
+      allowedEmailDomain: null,
+      allowedEmailDomains: [],
+      enrollmentFormatRegex: DEFAULT_ENROLLMENT_REGEX,
+      enrollmentFormatExample: DEFAULT_ENROLLMENT_EXAMPLE,
+    };
   }
 
   // 2. Bikes Catalog
@@ -217,7 +224,7 @@ class MockApiService {
   }
 
   // 6. Request OTP
-  async requestOtp(email: string): Promise<{ success: boolean; message: string }> {
+  async requestOtp(email: string): Promise<{ success: true; message: string; cooldownSeconds: number }> {
     await this.delay(200);
     const trimmed = email.toLowerCase().trim();
 
@@ -231,6 +238,7 @@ class MockApiService {
     return {
       success: true,
       message: `A 6-digit verification code has been dispatched to ${trimmed}. For mock testing, use code: 123456`,
+      cooldownSeconds: 60,
     };
   }
 
@@ -238,7 +246,7 @@ class MockApiService {
   async verifyOtp(
     email: string,
     code: string
-  ): Promise<{ user: UserProfile | null; requiresProfileCompletion: boolean }> {
+  ): Promise<{ user: UserProfile; requiresProfileCompletion: boolean }> {
     await this.delay(250);
     const trimmed = email.toLowerCase().trim();
     const stored = this.pendingOtps.get(trimmed);
@@ -277,6 +285,8 @@ class MockApiService {
       course: '',
       year: '1st Year',
       isVerified: false,
+      emailVerified: true,
+      profileComplete: false,
       drivingLicenceVerified: false,
       studentIdVerified: false,
       createdAt: new Date().toISOString(),
@@ -309,8 +319,7 @@ class MockApiService {
       phone: data.phone,
       course: data.course,
       year: data.year,
-      isVerified: true,
-      studentIdVerified: true,
+      profileComplete: true,
     };
 
     return this.currentUser;

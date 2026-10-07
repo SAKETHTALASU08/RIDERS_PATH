@@ -4,7 +4,6 @@ import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { AuthModal } from '../components/auth/AuthModal';
 import { AuthProvider, useAuth } from '../context/AuthContext';
-import { PLATFORM_CONFIG } from '../config/platform.config';
 
 import { ToastProvider } from '../components/ui/Toast';
 
@@ -15,7 +14,7 @@ const TestAuthTrigger = () => {
 };
 
 describe('OTP Input & Authentication Flow', () => {
-  it('validates university domain email and rejects non-college emails', async () => {
+  it('keeps domain eligibility server-side and shows a generic next step', async () => {
     const user = userEvent.setup();
     render(
       <ToastProvider>
@@ -32,38 +31,12 @@ describe('OTP Input & Authentication Flow', () => {
     const emailInput = screen.getByLabelText(/college email address/i);
     const submitBtn = screen.getByRole('button', { name: /send verification code/i });
 
-    // Try submitting with a generic email
+    // The browser does not reveal whether the address is on the server allowlist.
     await user.type(emailInput, 'student@gmail.com');
     await user.click(submitBtn);
 
-    expect(
-      await screen.findByText(new RegExp(`@${PLATFORM_CONFIG.allowedEmailDomain}`, 'i'))
-    ).toBeInTheDocument();
-  });
-
-  it('accepts valid ICFAI email and transitions to 6-digit OTP screen', async () => {
-    const user = userEvent.setup();
-    render(
-      <ToastProvider>
-        <AuthProvider>
-          <TestAuthTrigger />
-          <AuthModal />
-        </AuthProvider>
-      </ToastProvider>
-    );
-
-    await user.click(screen.getByText('Open Auth'));
-    const emailInput = screen.getByLabelText(/college email address/i);
-    const submitBtn = screen.getByRole('button', { name: /send verification code/i });
-
-    await user.clear(emailInput);
-    await user.type(emailInput, `rohit@${PLATFORM_CONFIG.allowedEmailDomain}`);
-    await user.click(submitBtn);
-
-    // Should transition to Enter 6-Digit Code
     expect(await screen.findByText(/enter 6-digit code/i)).toBeInTheDocument();
-
-    // Verify 6 input boxes for digits
+    // Verify six OTP input boxes after the generic response.
     const digitInputs = screen.getAllByRole('textbox');
     expect(digitInputs).toHaveLength(6);
   });

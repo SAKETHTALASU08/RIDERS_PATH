@@ -1,24 +1,41 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Mail, ArrowRight, ShieldCheck, RefreshCw, KeyRound, UserCheck } from 'lucide-react';
+import { Mail, ArrowRight, ShieldCheck, RefreshCw, KeyRound, UserCheck, HelpCircle, CheckCircle2 } from 'lucide-react';
 import { Modal } from '../ui/Modal';
 import { Button } from '../ui/Button';
 import { Input } from '../ui/Input';
 import { Select } from '../ui/Select';
 import { useAuth } from '../../context/AuthContext';
+import { apiClient } from '../../api/client';
 import { PLATFORM_CONFIG } from '../../config/platform.config';
-import { ProfileCompletionSchema } from '../../shared/contract';
+import {
+  createManualVerificationRequestSchema,
+  createProfileCompletionSchema,
+} from '../../shared/contract';
+import { DEFAULT_ENROLLMENT_EXAMPLE, DEFAULT_ENROLLMENT_REGEX } from '../../shared/validators';
+
+function apiErrorMessage(error: any, fallback: string) {
+  if (error instanceof TypeError) return 'Network error. Check your connection and try again.';
+  if (error?.message) return error.message;
+  if (error?.error) return error.error;
+  return fallback;
+}
 
 export const AuthModal: React.FC = () => {
-  const { isAuthModalOpen, closeAuthModal, requestOtp, verifyOtp, completeProfile } = useAuth();
+  const { user, isAuthModalOpen, closeAuthModal, requestOtp, verifyOtp, completeProfile, submitManualVerification } = useAuth();
 
-  // Steps: 'email' | 'otp' | 'profile'
-  const [step, setStep] = useState<'email' | 'otp' | 'profile'>('email');
+  // Steps: 'email' | 'otp' | 'profile' | 'manual'
+  const [step, setStep] = useState<'email' | 'otp' | 'profile' | 'manual'>('email');
   const [email, setEmail] = useState('');
   const [otpDigits, setOtpDigits] = useState(['', '', '', '', '', '']);
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
   const [resendSeconds, setResendSeconds] = useState(60);
   const [canResend, setCanResend] = useState(false);
+  const [resendUntil, setResendUntil] = useState<number | null>(null);
+  const [otpLocked, setOtpLocked] = useState(false);
+  const [allowedDomains, setAllowedDomains] = useState<string[]>([]);
+  const [enrollmentRegex, setEnrollmentRegex] = useState(DEFAULT_ENROLLMENT_REGEX);
+  const [enrollmentExample, setEnrollmentExample] = useState(DEFAULT_ENROLLMENT_EXAMPLE);
 
   // Profile completion fields
   const [profileData, setProfileData] = useState({
@@ -30,29 +47,71 @@ export const AuthModal: React.FC = () => {
   });
   const [profileErrors, setProfileErrors] = useState<Record<string, string>>({});
 
+  // Manual fallback verification fields
+  const [manualData, setManualData] = useState({
+    name: '',
+    enrollmentNumber: '',
+    alternateEmail: '',
+    note: '',
+  });
+  const [manualSubmitted, setManualSubmitted] = useState(false);
+
   const digitInputRefs = useRef<(HTMLInputElement | null)[]>([]);
+
+  // Fetch allowed email domain from public config
+  useEffect(() => {
+    let isMounted = true;
+    apiClient.getConfig().then((cfg: any) => {
+      if (isMounted && cfg) {
+        if (cfg.allowedEmailDomains && Array.isArray(cfg.allowedEmailDomains) && cfg.allowedEmailDomains.length > 0) {
+          setAllowedDomains(cfg.allowedEmailDomains);
+        } else if (cfg.allowedEmailDomain) {
+          setAllowedDomains([cfg.allowedEmailDomain]);
+        } else {
+          setAllowedDomains([]);
+        }
+        if (typeof cfg.enrollmentFormatRegex === 'string') setEnrollmentRegex(cfg.enrollmentFormatRegex);
+        if (typeof cfg.enrollmentFormatExample === 'string') setEnrollmentExample(cfg.enrollmentFormatExample);
+      }
+    }).catch(() => {
+      // Keep the shared permissive placeholder until the API configuration is reachable.
+    });
+    return () => { isMounted = false; };
+  }, []);
 
   // Reset modal state when opened/closed
   useEffect(() => {
     if (isAuthModalOpen) {
-      setStep('email');
+      setStep(user?.emailVerified && !user.profileComplete ? 'profile' : 'email');
       setEmail('');
       setOtpDigits(['', '', '', '', '', '']);
       setErrorMessage('');
+      setOtpLocked(false);
       setProfileErrors({});
+      setManualSubmitted(false);
     }
-  }, [isAuthModalOpen]);
+  }, [isAuthModalOpen, user?.emailVerified, user?.profileComplete]);
 
-  // Resend countdown timer
+  const startResendCooldown = (seconds: number) => {
+    const safeSeconds = Math.max(0, Math.ceil(seconds));
+    setResendSeconds(safeSeconds);
+    setCanResend(safeSeconds === 0);
+    setResendUntil(safeSeconds > 0 ? Date.now() + safeSeconds * 1000 : null);
+  };
+
+  // Count down from the server-provided cooldown using a deadline to avoid timer drift.
   useEffect(() => {
-    let timer: NodeJS.Timeout;
-    if (step === 'otp' && resendSeconds > 0) {
-      timer = setTimeout(() => setResendSeconds((prev) => prev - 1), 1000);
-    } else if (resendSeconds === 0) {
-      setCanResend(true);
-    }
-    return () => clearTimeout(timer);
-  }, [step, resendSeconds]);
+    if (step !== 'otp' || resendUntil === null) return;
+    const updateRemaining = () => {
+      const remaining = Math.max(0, Math.ceil((resendUntil - Date.now()) / 1000));
+      setResendSeconds(remaining);
+      setCanResend(remaining === 0);
+      if (remaining === 0) setResendUntil(null);
+    };
+    updateRemaining();
+    const timer = setInterval(updateRemaining, 250);
+    return () => clearInterval(timer);
+  }, [step, resendUntil]);
 
   // 1. Submit email for OTP
   const handleEmailSubmit = async (e: React.FormEvent) => {
@@ -65,26 +124,22 @@ export const AuthModal: React.FC = () => {
       return;
     }
 
-    if (
-      !trimmed.endsWith(`@${PLATFORM_CONFIG.allowedEmailDomain}`) &&
-      !trimmed.endsWith('.icfaiuniversity.in') &&
-      !trimmed.endsWith('@ifheindia.org')
-    ) {
-      setErrorMessage(`Please use your official ICFAI email address (@${PLATFORM_CONFIG.allowedEmailDomain})`);
-      return;
-    }
-
     setIsLoading(true);
     try {
-      await requestOtp(trimmed);
+      const res = await requestOtp(trimmed);
       setStep('otp');
-      setResendSeconds(60);
-      setCanResend(false);
+      setOtpLocked(false);
+      startResendCooldown(res.cooldownSeconds);
       setTimeout(() => {
         digitInputRefs.current[0]?.focus();
       }, 100);
     } catch (err: any) {
-      setErrorMessage(err.message || 'Unable to send OTP. Please try again.');
+      const cooldown = Number(err?.cooldownSeconds ?? err?.retryAfterSeconds);
+      if (cooldown > 0) {
+        setStep('otp');
+        startResendCooldown(cooldown);
+      }
+      setErrorMessage(apiErrorMessage(err, 'Unable to process the verification request. Please try again.'));
     } finally {
       setIsLoading(false);
     }
@@ -137,7 +192,14 @@ export const AuthModal: React.FC = () => {
         setStep('profile');
       }
     } catch (err: any) {
-      setErrorMessage(err.message || 'Invalid or expired verification code');
+      const code = err?.code;
+      if (code === 'OTP_LOCKED_OUT') {
+        setOtpLocked(true);
+        setOtpDigits(['', '', '', '', '', '']);
+      }
+      const attempts = Number(err?.attemptsRemaining);
+      const suffix = attempts > 0 ? ` ${attempts} attempt${attempts === 1 ? '' : 's'} remaining.` : '';
+      setErrorMessage(`${apiErrorMessage(err, 'Invalid or expired verification code.')}${suffix}`);
     } finally {
       setIsLoading(false);
     }
@@ -148,13 +210,15 @@ export const AuthModal: React.FC = () => {
     setIsLoading(true);
     setErrorMessage('');
     try {
-      await requestOtp(email);
-      setResendSeconds(60);
-      setCanResend(false);
+      const res = await requestOtp(email);
+      startResendCooldown(res.cooldownSeconds);
+      setOtpLocked(false);
       setOtpDigits(['', '', '', '', '', '']);
       digitInputRefs.current[0]?.focus();
     } catch (err: any) {
-      setErrorMessage(err.message || 'Could not resend OTP');
+      const cooldown = Number(err?.cooldownSeconds ?? err?.retryAfterSeconds);
+      if (cooldown > 0) startResendCooldown(cooldown);
+      setErrorMessage(apiErrorMessage(err, 'Unable to process the verification request. Please try again.'));
     } finally {
       setIsLoading(false);
     }
@@ -165,7 +229,7 @@ export const AuthModal: React.FC = () => {
     e.preventDefault();
     setProfileErrors({});
 
-    const result = ProfileCompletionSchema.safeParse(profileData);
+    const result = createProfileCompletionSchema(enrollmentRegex, enrollmentExample).safeParse(profileData);
     if (!result.success) {
       const fieldErrors: Record<string, string> = {};
       result.error.issues.forEach((issue) => {
@@ -181,7 +245,28 @@ export const AuthModal: React.FC = () => {
     try {
       await completeProfile(result.data);
     } catch (err: any) {
-      setErrorMessage(err.message || 'Failed to update student profile');
+      setErrorMessage(apiErrorMessage(err, 'Failed to update student profile'));
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // 4. Submit manual verification request
+  const handleManualSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setErrorMessage('');
+    const result = createManualVerificationRequestSchema(enrollmentRegex, enrollmentExample).safeParse(manualData);
+    if (!result.success) {
+      setErrorMessage(result.error.issues[0]?.message || 'Please check your details and try again.');
+      return;
+    }
+
+    setIsLoading(true);
+    try {
+      await submitManualVerification(result.data);
+      setManualSubmitted(true);
+    } catch (err: any) {
+      setErrorMessage(apiErrorMessage(err, 'Failed to submit manual verification request'));
     } finally {
       setIsLoading(false);
     }
@@ -193,16 +278,22 @@ export const AuthModal: React.FC = () => {
       onClose={closeAuthModal}
       title={
         step === 'email'
-          ? 'ICFAI Student Access'
+          ? 'Campus Student Access'
           : step === 'otp'
           ? 'Enter 6-Digit Code'
+          : step === 'manual'
+          ? 'Request Manual Verification'
           : 'Complete Student Profile'
       }
       description={
         step === 'email'
-          ? 'Single sign-in with your official university email'
+          ? allowedDomains.length > 0
+            ? `Passwordless sign-in with official university email (${allowedDomains.map((domain) => `@${domain}`).join(', ')})`
+            : 'Passwordless sign-in with your official university email'
           : step === 'otp'
-          ? `Code sent to ${email}`
+          ? `Code dispatched to ${email}`
+          : step === 'manual'
+          ? 'For students awaiting official campus email setup'
           : 'Provide your enrollment details for campus handover clearance'
       }
     >
@@ -223,14 +314,16 @@ export const AuthModal: React.FC = () => {
             required
             autoFocus
             autoComplete="email"
-            placeholder={`name@${PLATFORM_CONFIG.allowedEmailDomain}`}
+            placeholder={allowedDomains[0] ? `student@${allowedDomains[0]}` : 'Enter your campus email'}
             value={email}
             onChange={(e) => {
               setEmail(e.target.value);
               setErrorMessage('');
             }}
             error={errorMessage}
-            helperText={`Must end in @${PLATFORM_CONFIG.allowedEmailDomain}`}
+            helperText={allowedDomains.length > 0
+              ? `Allowed domains: ${allowedDomains.map((d) => '@' + d).join(', ')}`
+              : 'Campus email domains are provided by the server configuration.'}
             leftIcon={<Mail className="w-4 h-4" />}
           />
 
@@ -242,6 +335,19 @@ export const AuthModal: React.FC = () => {
           >
             Send Verification Code
           </Button>
+
+          <div className="text-center pt-2">
+            <button
+              type="button"
+              onClick={() => {
+                setStep('manual');
+                setErrorMessage('');
+              }}
+              className="text-xs text-neutral-400 hover:text-amber-400 cursor-pointer underline underline-offset-4"
+            >
+              Don't have a campus email yet? Request manual verification
+            </button>
+          </div>
         </form>
       )}
 
@@ -275,18 +381,22 @@ export const AuthModal: React.FC = () => {
           <div className="flex flex-col gap-3">
             <Button
               type="button"
-              onClick={() => handleVerifyCode()}
+              disabled={isLoading || (otpLocked && !canResend)}
+              onClick={() => otpLocked ? handleResendOtp() : handleVerifyCode()}
               isLoading={isLoading}
               className="w-full"
               leftIcon={<KeyRound className="w-4 h-4" />}
             >
-              Verify Code
+              {otpLocked ? 'Request a New Code' : 'Verify Code'}
             </Button>
 
             <div className="flex items-center justify-between text-xs pt-2 border-t border-neutral-800">
               <button
                 type="button"
-                onClick={() => setStep('email')}
+                onClick={() => {
+                  setStep('email');
+                  setErrorMessage('');
+                }}
                 className="text-neutral-400 hover:text-neutral-200 cursor-pointer p-1 min-h-[44px] flex items-center"
               >
                 Change Email
@@ -311,6 +421,12 @@ export const AuthModal: React.FC = () => {
       {/* Step 3: Profile Completion for new students */}
       {step === 'profile' && (
         <form onSubmit={handleProfileSubmit} className="flex flex-col gap-3.5">
+          {errorMessage && (
+            <p role="alert" aria-live="polite" className="text-xs font-medium text-rose-400">
+              {errorMessage}
+            </p>
+          )}
+
           <Input
             id="student-name"
             label="Full Student Name"
@@ -323,23 +439,23 @@ export const AuthModal: React.FC = () => {
 
           <Input
             id="student-enrollment"
-            label="ICFAI Enrollment Number"
+            label="Campus Enrollment Number"
             required
-            placeholder="e.g. 21BSPH0412"
+            placeholder={enrollmentExample}
             value={profileData.enrollmentNumber}
             onChange={(e) =>
               setProfileData({ ...profileData, enrollmentNumber: e.target.value.toUpperCase() })
             }
             error={profileErrors.enrollmentNumber}
-            helperText="Matches format: 2-digit year + faculty letters + digits"
+            helperText={`Must match configured campus format (example: ${enrollmentExample})`}
           />
 
           <Input
             id="student-phone"
-            label="Mobile Number (WhatsApp Handover Contact)"
+            label="Mobile Number (Handover Contact)"
             type="tel"
             required
-            placeholder="10-digit mobile number"
+            placeholder="10-digit Indian phone number"
             value={profileData.phone}
             onChange={(e) => setProfileData({ ...profileData, phone: e.target.value })}
             error={profileErrors.phone}
@@ -386,6 +502,91 @@ export const AuthModal: React.FC = () => {
             Activate Student Account
           </Button>
         </form>
+      )}
+
+      {/* Step 4: Fallback Manual Verification Request */}
+      {step === 'manual' && (
+        <div>
+          {manualSubmitted ? (
+            <div className="flex flex-col items-center text-center gap-3 py-6">
+              <CheckCircle2 className="w-12 h-12 text-emerald-400" />
+              <h3 className="font-semibold text-neutral-100">Verification Request Received</h3>
+              <p className="text-sm text-neutral-400 max-w-sm">
+                A campus fleet coordinator will review your student credentials manually. Once approved, you will be notified at your contact email.
+              </p>
+              <Button type="button" onClick={closeAuthModal} className="mt-4">
+                Done
+              </Button>
+            </div>
+          ) : (
+            <form onSubmit={handleManualSubmit} className="flex flex-col gap-3.5">
+              <div className="p-3 rounded-xl bg-blue-500/10 border border-blue-500/20 text-xs text-blue-300 flex items-start gap-2">
+                <HelpCircle className="w-4 h-4 text-blue-400 shrink-0 mt-0.5" />
+                <span>Submit your details for human coordinator verification if your university email is pending.</span>
+              </div>
+
+              {errorMessage && (
+                <p role="alert" aria-live="polite" className="text-xs font-medium text-rose-400">
+                  {errorMessage}
+                </p>
+              )}
+
+              <Input
+                id="manual-name"
+                label="Full Name"
+                required
+                placeholder="Student Name"
+                value={manualData.name}
+                onChange={(e) => setManualData({ ...manualData, name: e.target.value })}
+              />
+
+              <Input
+                id="manual-enrollment"
+                label="Enrollment / Roll Number"
+                required
+                placeholder={enrollmentExample}
+                value={manualData.enrollmentNumber}
+                onChange={(e) => setManualData({ ...manualData, enrollmentNumber: e.target.value.toUpperCase() })}
+              />
+
+              <Input
+                id="manual-email"
+                label="Personal / Alternate Contact Email"
+                type="email"
+                required
+                placeholder="personal@gmail.com"
+                value={manualData.alternateEmail}
+                onChange={(e) => setManualData({ ...manualData, alternateEmail: e.target.value })}
+              />
+
+              <Input
+                id="manual-note"
+                label="Additional Details (Optional)"
+                placeholder="Department, batch, or reason"
+                value={manualData.note}
+                onChange={(e) => setManualData({ ...manualData, note: e.target.value })}
+              />
+
+              <div className="flex items-center gap-2 mt-2">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  onClick={() => setStep('email')}
+                  className="w-1/3"
+                >
+                  Back
+                </Button>
+                <Button
+                  type="submit"
+                  isLoading={isLoading}
+                  className="w-2/3"
+                >
+                  Submit Request
+                </Button>
+              </div>
+            </form>
+          )}
+        </div>
       )}
     </Modal>
   );

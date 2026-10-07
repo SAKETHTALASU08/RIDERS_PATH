@@ -139,15 +139,17 @@ export const INITIAL_MOCK_BIKES: PublicBikeDto[] = [
 
 export const MOCK_USER: UserProfile = {
   id: 'usr_icfai_student_01',
-  email: 'rohit.sharma@icfaiuniversity.in',
+  email: 'rohit.sharma@student.example.edu',
   name: 'Rohit Sharma',
-  enrollmentNumber: '21BSPH0412',
+  enrollmentNumber: 'ABCD-456',
   phone: '9848022338',
   course: 'B.Tech Computer Science & Engineering',
   year: '3rd Year',
-  isVerified: true,
-  drivingLicenceVerified: true,
-  studentIdVerified: true,
+  isVerified: false,
+  emailVerified: true,
+  profileComplete: true,
+  drivingLicenceVerified: false,
+  studentIdVerified: false,
   createdAt: '2026-08-15T10:00:00.000Z',
 };
 

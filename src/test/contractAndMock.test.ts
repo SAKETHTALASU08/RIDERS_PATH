@@ -7,13 +7,13 @@ import {
 import { mockApi } from '../api/mock';
 
 describe('Shared Contract & Validation', () => {
-  it('enforces ICFAI campus email for OTP requests', () => {
+  it('validates OTP email syntax without embedding an institution allowlist', () => {
     expect(() =>
-      OtpRequestSchema.parse({ email: 'student@icfaiuniversity.in' })
+      OtpRequestSchema.parse({ email: 'student@student.example.edu' })
     ).not.toThrow();
 
     expect(() =>
-      OtpRequestSchema.parse({ email: 'outsider@gmail.com' })
+      OtpRequestSchema.parse({ email: 'not-an-email' })
     ).toThrow();
   });
 

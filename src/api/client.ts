@@ -15,12 +15,15 @@ import {
   OwnerListing,
   OwnerListingSchema,
   ApiErrorShape,
+  OtpRequestResponse,
+  OtpRequestResponseSchema,
+  OtpVerifyResponse,
+  OtpVerifyResponseSchema,
 } from '../shared/contract';
 import { mockApi, BikeFilterParams } from './mock';
 
-const USE_MOCK =
-  import.meta.env.VITE_USE_MOCK_API !== 'false' ||
-  !import.meta.env.VITE_API_URL;
+// Real server API is the default. Set VITE_USE_MOCK_API=true only for explicit mock demos.
+const USE_MOCK = import.meta.env.VITE_USE_MOCK_API === 'true' || import.meta.env.MODE === 'test';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -56,7 +59,11 @@ async function request<T>(
         status: response.status,
       };
     }
-    throw errorData;
+    throw {
+      ...errorData,
+      message: errorData.message || errorData.error || 'An unexpected server error occurred',
+      status: errorData.status || response.status,
+    };
   }
 
   return response.json();
@@ -124,23 +131,25 @@ export const apiClient = {
   },
 
   // Authentication & OTP
-  async requestOtp(email: string): Promise<{ success: boolean; message: string }> {
+  async requestOtp(email: string): Promise<OtpRequestResponse> {
     if (USE_MOCK) return mockApi.requestOtp(email);
-    return request('/auth/otp/request', {
+    const data = await request('/auth/otp/request', {
       method: 'POST',
       body: JSON.stringify({ email }),
     });
+    return OtpRequestResponseSchema.parse(data);
   },
 
   async verifyOtp(
     email: string,
     code: string
-  ): Promise<{ user: UserProfile | null; requiresProfileCompletion: boolean }> {
+  ): Promise<OtpVerifyResponse> {
     if (USE_MOCK) return mockApi.verifyOtp(email, code);
-    return request('/auth/otp/verify', {
+    const data = await request('/auth/otp/verify', {
       method: 'POST',
       body: JSON.stringify({ email, code }),
     });
+    return OtpVerifyResponseSchema.parse(data);
   },
 
   async getCurrentUser(): Promise<UserProfile | null> {
@@ -155,11 +164,24 @@ export const apiClient = {
 
   async updateProfile(data: ProfileCompletion): Promise<UserProfile> {
     if (USE_MOCK) return mockApi.updateProfile(data);
-    const updated = await request('/auth/profile', {
+    const updated = await request('/users/me/profile', {
       method: 'PUT',
       body: JSON.stringify(data),
     });
     return UserProfileSchema.parse(updated);
+  },
+
+  async submitManualVerification(data: {
+    name: string;
+    enrollmentNumber: string;
+    alternateEmail: string;
+    note?: string;
+  }): Promise<{ success: boolean; message: string; requestId?: string }> {
+    if (USE_MOCK) return { success: true, message: 'Verification request submitted for admin review.' };
+    return request('/auth/manual-verification-request', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
   },
 
   async logout(): Promise<{ success: boolean }> {

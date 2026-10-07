@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useId } from 'react';
-import { useParams, useNavigate, Link } from 'react-router-dom';
+import { useParams, useNavigate, useLocation, Link } from 'react-router-dom';
 import {
   ArrowLeft,
   ArrowRight,
@@ -37,7 +37,8 @@ import { useToast } from '../components/ui/Toast';
 export const BookingFlowPage: React.FC = () => {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const { user, openAuthModal } = useAuth();
+  const location = useLocation();
+  const { user } = useAuth();
   const toast = useToast();
 
   const [bike, setBike] = useState<PublicBikeDto | null>(null);
@@ -187,8 +188,13 @@ export const BookingFlowPage: React.FC = () => {
 
   // Step 4: Final Booking Submission (Idempotent)
   const handleFinalBookingSubmit = async () => {
-    if (!user) {
-      openAuthModal();
+    if (!user || !user.emailVerified || !user.profileComplete) {
+      navigate('/signin', {
+        state: {
+          backgroundLocation: location,
+          returnTo: location.pathname,
+        },
+      });
       return;
     }
 
