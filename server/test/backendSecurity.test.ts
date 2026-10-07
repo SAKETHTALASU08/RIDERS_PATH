@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import request from 'supertest';
+import crypto from 'crypto';
 import { app } from '../../server';
 import { db, sqlite } from '../db';
 import { STUDENT_SESSION_COOKIE, ADMIN_SESSION_COOKIE } from '../middleware/auth';
@@ -19,19 +20,22 @@ describe('Backend Security & Authorization Integration Tests', () => {
     sqlite.prepare("DELETE FROM users WHERE id NOT IN ('usr_system_admin', 'usr_owner_student_01')").run();
     sqlite.prepare('DELETE FROM sessions').run();
 
-    // 1. Authenticate Student 1 via dev-login helper
-    const res1 = await request(app)
-      .post('/api/auth/dev-login')
-      .send({ enrollment: '21BSPH0555', email: 'student1@icfaiuniversity.in', fullName: 'Student One' });
-    student1Token = res1.body.token;
-    student1Id = res1.body.user.id;
+    // Test-only fixtures issue sessions directly; the passwordless bypass route is removed.
+    const student1 = db.createUser({
+      fullName: 'Student One', email: 'student1@student.example.edu', icfaiEnrollment: 'ABCD-0555',
+      phone: '9848099887', emailVerified: 1, profileComplete: 1, drivingLicenceVerified: 1,
+    });
+    student1Id = student1.id;
+    student1Token = crypto.randomBytes(32).toString('hex');
+    db.createSession(student1Token, student1Id, 'student');
 
-    // 2. Authenticate Student 2
-    const res2 = await request(app)
-      .post('/api/auth/dev-login')
-      .send({ enrollment: '21BSPH0102', email: 'student2@icfaiuniversity.in', fullName: 'Student Two' });
-    student2Token = res2.body.token;
-    student2Id = res2.body.user.id;
+    const student2 = db.createUser({
+      fullName: 'Student Two', email: 'student2@student.example.edu', icfaiEnrollment: 'ABCD-0102',
+      phone: '9848099888', emailVerified: 1, profileComplete: 1, drivingLicenceVerified: 1,
+    });
+    student2Id = student2.id;
+    student2Token = crypto.randomBytes(32).toString('hex');
+    db.createSession(student2Token, student2Id, 'student');
 
     // 3. Authenticate Admin
     const adminRes = await request(app)
@@ -147,7 +151,7 @@ describe('Backend Security & Authorization Integration Tests', () => {
   it('rejects mass-assignment attempts on student profile updates', async () => {
     const maliciousPayload = {
       name: 'Legitimate Name',
-      enrollmentNumber: '21BSPH0555',
+      enrollmentNumber: 'ABCD-0555',
       phone: '9848099887',
       course: 'B.Tech CSE',
       year: '3rd Year',
@@ -158,7 +162,7 @@ describe('Backend Security & Authorization Integration Tests', () => {
     };
 
     const res = await request(app)
-      .put('/api/auth/profile')
+      .put('/api/users/me/profile')
       .set('Cookie', [`${STUDENT_SESSION_COOKIE}=${student1Token}`])
       .send(maliciousPayload);
 

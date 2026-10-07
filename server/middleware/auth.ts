@@ -5,6 +5,19 @@ import { env } from '../config/env';
 
 export const STUDENT_SESSION_COOKIE = 'rp_student_session';
 export const ADMIN_SESSION_COOKIE = 'rp_admin_session';
+export const STUDENT_SESSION_COOKIE_OPTIONS = {
+  httpOnly: true,
+  secure: env.NODE_ENV === 'production',
+  sameSite: 'lax' as const,
+  path: '/',
+  maxAge: 7 * 24 * 60 * 60 * 1000,
+};
+export const STUDENT_SESSION_COOKIE_CLEAR_OPTIONS = {
+  httpOnly: true,
+  secure: env.NODE_ENV === 'production',
+  sameSite: 'lax' as const,
+  path: '/',
+};
 
 export interface AuthenticatedUser {
   id: string;
@@ -16,6 +29,10 @@ export interface AuthenticatedUser {
   course: string;
   role: string;
   verificationStatus: string;
+  emailVerified: boolean;
+  profileComplete: boolean;
+  drivingLicenceVerified: boolean;
+  createdAt: string;
 }
 
 declare global {
@@ -96,17 +113,47 @@ export function requireUser(req: Request, res: Response, next: NextFunction) {
 
   req.user = {
     id: user.id,
-    fullName: user.full_name,
+    fullName: user.full_name || '',
     email: user.email,
-    phone: user.phone,
-    icfaiEnrollment: user.icfai_enrollment,
-    academicYear: user.academic_year,
-    course: user.course,
+    phone: user.phone || '',
+    icfaiEnrollment: user.icfai_enrollment || '',
+    academicYear: user.academic_year || '1st Year',
+    course: user.course || '',
     role: user.role,
     verificationStatus: user.verification_status,
+    emailVerified: Boolean(user.email_verified),
+    profileComplete: Boolean(user.profile_complete),
+    drivingLicenceVerified: Boolean(user.driving_licence_verified),
+    createdAt: user.created_at,
   };
   req.rawSessionToken = token;
 
+  next();
+}
+
+/**
+ * Ensures user has completed email OTP verification
+ */
+export function requireEmailVerified(req: Request, res: Response, next: NextFunction) {
+  if (!req.user || !req.user.emailVerified) {
+    return res.status(403).json({
+      error: 'Campus email verification required to proceed',
+      code: 'EMAIL_VERIFICATION_REQUIRED',
+    });
+  }
+  next();
+}
+
+/**
+ * Ensures user has completed profile information
+ */
+export function requireProfileComplete(req: Request, res: Response, next: NextFunction) {
+  if (!req.user || !req.user.profileComplete) {
+    return res.status(403).json({
+      error: 'Please complete your student profile before performing this action',
+      code: 'PROFILE_INCOMPLETE',
+    });
+  }
   next();
 }
 

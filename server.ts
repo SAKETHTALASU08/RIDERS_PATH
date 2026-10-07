@@ -5,29 +5,34 @@ import cors from 'cors';
 import cookieParser from 'cookie-parser';
 import crypto from 'crypto';
 import { z } from 'zod';
-import { env } from './server/config/env';
+import { env, getAllowedEmailDomains } from './server/config/env';
 import { db, runMigrations, sqlite } from './server/db';
 import {
   requireUser,
   requireAdmin,
+  requireEmailVerified,
+  requireProfileComplete,
   verifyCsrfOrigin,
   STUDENT_SESSION_COOKIE,
+  STUDENT_SESSION_COOKIE_OPTIONS,
+  STUDENT_SESSION_COOKIE_CLEAR_OPTIONS,
   ADMIN_SESSION_COOKIE,
 } from './server/middleware/auth';
 import {
   globalLimiter,
   authLimiter,
-  otpLimiter,
   bookingLimiter,
   ownerLimiter,
   geminiLimiter,
 } from './server/middleware/rateLimit';
 import { documentUpload, verifyMagicBytes } from './server/middleware/upload';
 import { verifyDocumentWithGemini } from './server/gemini';
+import { getMailer } from './server/services/mailer';
 import {
   OtpRequestSchema,
   OtpVerifySchema,
-  ProfileCompletionSchema,
+  createProfileCompletionSchema,
+  createManualVerificationRequestSchema,
   BookingCreateSchema,
   OwnerOnboardingSchema,
   PublicBikeDtoSchema,
@@ -122,10 +127,14 @@ app.get('/api/health', (_req: Request, res: Response) => {
 
 // Explicit allowlist public config (never leaks secrets or internal hashes)
 app.get('/api/config', (_req: Request, res: Response) => {
+  const allowedEmailDomains = getAllowedEmailDomains();
   res.json({
     appName: PLATFORM_CONFIG.appName,
     campusName: PLATFORM_CONFIG.campusName,
-    allowedEmailDomain: PLATFORM_CONFIG.allowedEmailDomain,
+    allowedEmailDomain: allowedEmailDomains[0] || null,
+    allowedEmailDomains,
+    enrollmentFormatRegex: env.ENROLLMENT_FORMAT_REGEX,
+    enrollmentFormatExample: env.ENROLLMENT_FORMAT_EXAMPLE,
     termsVersion: PLATFORM_CONFIG.termsVersion,
     privacyVersion: PLATFORM_CONFIG.privacyVersion,
     depositPolicy: PLATFORM_CONFIG.depositPolicy,
@@ -159,173 +168,348 @@ app.put('/api/config', requireAdmin, (req: Request, res: Response) => {
 });
 
 // ----------------------------------------------------
-// AUTHENTICATION ROUTES (STUDENT OTP + DEV HELPER)
+// AUTHENTICATION ROUTES (STUDENT PASSWORDLESS OTP)
 // ----------------------------------------------------
-app.post('/api/auth/otp/request', otpLimiter, (req: Request, res: Response) => {
+
+/**
+ * Computes deterministic HMAC-SHA256 of normalized email + code
+ */
+function computeOtpHmac(email: string, code: string): string {
+  return crypto
+    .createHmac('sha256', env.OTP_HMAC_SECRET)
+    .update(`${email.trim().toLowerCase()}:${code.trim()}`)
+    .digest('hex');
+}
+
+const GENERIC_OTP_REQUEST_MESSAGE = 'If this is a valid campus email address, a verification code has been dispatched.';
+const OTP_REQUEST_MIN_RESPONSE_MS = 500;
+
+async function keepOtpRequestTimingSimilar(startedAt: number) {
+  const remaining = OTP_REQUEST_MIN_RESPONSE_MS - (Date.now() - startedAt);
+  if (remaining > 0) await new Promise((resolve) => setTimeout(resolve, remaining));
+}
+
+function toUserProfile(user: any) {
+  return {
+    id: user.id,
+    name: user.full_name || '',
+    email: user.email,
+    phone: user.phone || '',
+    enrollmentNumber: user.icfai_enrollment || '',
+    course: user.course || '',
+    year: user.academic_year || '1st Year',
+    isVerified: user.verification_status === 'verified',
+    emailVerified: Boolean(user.email_verified),
+    profileComplete: Boolean(user.profile_complete),
+    drivingLicenceVerified: Boolean(user.driving_licence_verified),
+    studentIdVerified: false,
+    createdAt: user.created_at,
+  };
+}
+
+app.post('/api/auth/otp/request', async (req: Request, res: Response) => {
+  const startedAt = Date.now();
   const parseResult = OtpRequestSchema.safeParse(req.body);
   if (!parseResult.success) {
     return res.status(400).json({
-      error: parseResult.error.errors[0]?.message || 'Invalid campus email address',
+      error: 'Please enter a valid email address',
+      code: 'INVALID_EMAIL',
     });
   }
 
   const { email } = parseResult.data;
-  // Deterministic 6-digit numeric OTP code
-  const code = env.NODE_ENV === 'test' || env.NODE_ENV === 'development' ? '123456' : `${Math.floor(100000 + Math.random() * 900000)}`;
+  const normalizedEmail = email.trim().toLowerCase();
+  const emailHash = crypto.createHash('sha256').update(normalizedEmail).digest('hex').substring(0, 16);
+  db.logAudit({
+    actorId: emailHash,
+    actorRole: 'student',
+    action: 'OTP_REQUESTED',
+    targetType: 'auth',
+    targetId: emailHash,
+    ipAddress: req.ip,
+    userAgent: req.headers['user-agent'],
+  });
+  const allowedDomains = getAllowedEmailDomains();
 
-  db.storeOtp(email, code);
+  // Fail closed if allowed domains are not configured
+  if (allowedDomains.length === 0) {
+    await keepOtpRequestTimingSimilar(startedAt);
+    return res.status(503).json({
+      error: 'Unable to process the verification request at this time. Please try again later.',
+      code: 'AUTH_UNAVAILABLE',
+    });
+  }
 
-  // Uniform response message whether or not account exists to prevent account enumeration
+  // Non-campus domains get the same public response as eligible requests.
+  const isAllowedDomain = allowedDomains.some((d) => normalizedEmail.endsWith('@' + d));
+  if (!isAllowedDomain) {
+    await keepOtpRequestTimingSimilar(startedAt);
+    return res.json({
+      success: true,
+      message: GENERIC_OTP_REQUEST_MESSAGE,
+      cooldownSeconds: env.OTP_RESEND_COOLDOWN_SECONDS,
+    });
+  }
+
+  const clientIp = req.ip || '127.0.0.1';
+  const reservation = db.reserveOtpSend(normalizedEmail, clientIp, {
+    cooldownSeconds: env.OTP_RESEND_COOLDOWN_SECONDS,
+    maxPerEmailPerHour: env.OTP_MAX_SENDS_PER_HOUR,
+    maxPerIpPerHour: env.OTP_MAX_SENDS_PER_IP_PER_HOUR,
+  });
+  if (!reservation.allowed) {
+    await keepOtpRequestTimingSimilar(startedAt);
+    return res.status(429).json({
+      error: 'Too many verification requests. Please try again later.',
+      code: 'OTP_RATE_LIMITED',
+      cooldownSeconds: reservation.retryAfterSeconds,
+      retryAfterSeconds: reservation.retryAfterSeconds,
+    });
+  }
+
+  // 4. Generate random 6-digit numeric OTP and compute HMAC
+  const code = `${crypto.randomInt(100000, 1000000)}`;
+  const codeHash = computeOtpHmac(normalizedEmail, code);
+
+  // 5. Invalidate any earlier unused code for this email
+  db.invalidateEarlierOtpCodes(normalizedEmail);
+
+  // The send log was reserved atomically before dispatch for durable rate limiting.
+  const otpRecord = db.storeOtp(normalizedEmail, codeHash, env.OTP_TTL_MINUTES, 'PENDING');
+
+  // Keep SMTP latency out of the response path. The code cannot be verified until
+  // delivery succeeds, and a failed delivery removes the pending record.
+  void Promise.resolve()
+    .then(() => getMailer().sendOtpEmail({
+      toEmail: normalizedEmail,
+      code,
+      validityMinutes: env.OTP_TTL_MINUTES,
+      expiresAt: otpRecord.expiresAt,
+    }))
+    .then(() => db.markOtpReady(otpRecord.id))
+    .catch(() => db.deleteOtp(otpRecord.id));
+
+  await keepOtpRequestTimingSimilar(startedAt);
   res.json({
     success: true,
-    message: `A 6-digit verification code has been dispatched to ${email}.`,
+    message: GENERIC_OTP_REQUEST_MESSAGE,
+    cooldownSeconds: env.OTP_RESEND_COOLDOWN_SECONDS,
   });
 });
 
 app.post('/api/auth/otp/verify', authLimiter, (req: Request, res: Response) => {
   const parseResult = OtpVerifySchema.safeParse(req.body);
   if (!parseResult.success) {
-    return res.status(400).json({ error: parseResult.error.errors[0]?.message || 'Invalid OTP payload' });
+    return res.status(400).json({
+      error: 'Invalid verification payload. A 6-digit code is required.',
+      code: 'INVALID_PAYLOAD',
+    });
   }
 
   const { email, code } = parseResult.data;
-  const isValid = db.verifyOtp(email, code);
+  const normalizedEmail = email.trim().toLowerCase();
+  const emailHash = crypto.createHash('sha256').update(normalizedEmail).digest('hex').substring(0, 16);
 
-  if (!isValid) {
+  // 1. Look up active code
+  const activeOtp = db.getActiveOtp(normalizedEmail);
+  if (!activeOtp) {
+    const latestOtp = db.getLatestOtp(normalizedEmail);
+    if (latestOtp && latestOtp.attempts >= env.OTP_MAX_ATTEMPTS && new Date(latestOtp.expires_at) > new Date()) {
+      db.logAudit({
+        actorId: emailHash,
+        actorRole: 'student',
+        action: 'OTP_LOCKOUT',
+        targetType: 'auth',
+        targetId: emailHash,
+        ipAddress: req.ip,
+        userAgent: req.headers['user-agent'],
+      });
+      return res.status(400).json({
+        error: 'Verification code has been invalidated due to too many failed attempts. Please request a new code.',
+        code: 'OTP_LOCKED_OUT',
+      });
+    }
+
+    db.logAudit({
+      actorId: emailHash,
+      actorRole: 'student',
+      action: 'OTP_VERIFY_FAILURE',
+      targetType: 'auth',
+      targetId: 'inactive_or_expired',
+      ipAddress: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
     return res.status(400).json({
-      error: 'Invalid or expired verification code. Please request a new OTP.',
+      error: 'Invalid or expired verification code. Please request a new code.',
       code: 'INVALID_OTP',
     });
   }
 
-  let user = db.getUserByEmail(email);
-  const requiresProfileCompletion = !user || !user.full_name;
+  // 2. Constant-time comparison
+  const expectedHash = computeOtpHmac(normalizedEmail, code);
+  const expectedBuf = Buffer.from(expectedHash, 'hex');
+  const actualBuf = Buffer.from(activeOtp.code_hash, 'hex');
+  const isMatch = expectedBuf.length === actualBuf.length && crypto.timingSafeEqual(expectedBuf, actualBuf);
+  // 3. Serialize attempts and single-use consumption so concurrent requests
+  // cannot both succeed or bypass the attempt limit.
+  const verification = db.applyOtpVerification(activeOtp.id, isMatch, env.OTP_MAX_ATTEMPTS);
+  if (verification.status === 'locked') {
+    db.logAudit({
+      actorId: emailHash,
+      actorRole: 'student',
+      action: 'OTP_LOCKOUT',
+      targetType: 'auth',
+      targetId: emailHash,
+      ipAddress: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
+    return res.status(400).json({
+      error: 'Verification code has been invalidated due to too many failed attempts. Please request a new code.',
+      code: 'OTP_LOCKED_OUT',
+    });
+  }
 
+  if (verification.status === 'failed') {
+    db.logAudit({
+      actorId: emailHash,
+      actorRole: 'student',
+      action: 'OTP_VERIFY_FAILURE',
+      targetType: 'auth',
+      targetId: emailHash,
+      ipAddress: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
+
+    return res.status(400).json({
+      error: 'Incorrect verification code. Please try again.',
+      attemptsRemaining: env.OTP_MAX_ATTEMPTS - verification.attempts,
+      code: 'INVALID_OTP',
+    });
+  }
+
+  if (verification.status === 'inactive') {
+    db.logAudit({
+      actorId: emailHash,
+      actorRole: 'student',
+      action: 'OTP_VERIFY_FAILURE',
+      targetType: 'auth',
+      targetId: 'inactive_or_expired',
+      ipAddress: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
+    return res.status(400).json({
+      error: 'Invalid or expired verification code. Please request a new code.',
+      code: 'INVALID_OTP',
+    });
+  }
+
+  // 4. Find or create user with emailVerified = true, profileComplete = false
+  let user = db.getUserByEmail(normalizedEmail);
+  if (user && user.role !== 'student' && user.role !== 'owner') {
+    db.logAudit({
+      actorId: emailHash,
+      actorRole: 'student',
+      action: 'OTP_VERIFY_FAILURE',
+      targetType: 'auth',
+      targetId: emailHash,
+      ipAddress: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
+    return res.status(400).json({
+      error: 'Invalid or expired verification code. Please request a new code.',
+      code: 'INVALID_OTP',
+    });
+  }
   if (!user) {
     user = db.createUser({
-      fullName: '',
-      email,
-      phone: '',
-      icfaiEnrollment: '',
-      academicYear: '1st Year',
-      course: '',
+      email: normalizedEmail,
+      emailVerified: 1,
+      profileComplete: 0,
       role: 'student',
       verificationStatus: 'unverified',
     });
+  } else {
+    db.updateUser(user.id, { emailVerified: 1 });
+    user = db.getUserById(user.id)!;
   }
 
-  // Issue random 256-bit crypto session token stored hashed in SQLite
-  const rawToken = crypto.randomBytes(32).toString('hex');
-  db.createSession(rawToken, user.id, user.role, 24 * 7, req.ip, req.headers['user-agent']);
-
-  // Set httpOnly session cookie
-  res.cookie(STUDENT_SESSION_COOKIE, rawToken, {
-    httpOnly: true,
-    secure: env.NODE_ENV === 'production',
-    sameSite: 'lax',
-    maxAge: 7 * 24 * 60 * 60 * 1000,
-  });
-
-  res.json({
-    requiresProfileCompletion,
-    user: user.full_name
-      ? {
-          id: user.id,
-          name: user.full_name,
-          email: user.email,
-          phone: user.phone,
-          enrollmentNumber: user.icfai_enrollment,
-          course: user.course,
-          year: user.academic_year,
-          isVerified: user.verification_status === 'verified',
-          createdAt: user.created_at,
-        }
-      : null,
-  });
-});
-
-// Development-only login helper (explicitly disabled in production)
-app.post('/api/auth/dev-login', authLimiter, (req: Request, res: Response) => {
-  if (env.NODE_ENV === 'production') {
-    return res.status(404).json({ error: 'Endpoint unavailable in production environment' });
-  }
-
-  const { enrollment, email, fullName } = req.body;
-  const lookup = enrollment ? db.getUserByEnrollment(enrollment) : email ? db.getUserByEmail(email) : null;
-
-  let user = lookup;
-  if (!user) {
-    user = db.createUser({
-      fullName: fullName || 'Test ICFAI Student',
-      email: email || `${(enrollment || '21bsph0101').toLowerCase()}@icfaiuniversity.in`,
-      phone: '9848022338',
-      icfaiEnrollment: enrollment || '21BSPH0101',
-      academicYear: '3rd Year',
-      course: 'B.Tech CSE',
-      role: 'student',
-      verificationStatus: 'verified',
-    });
+  // 5. Session rotation: invalidate pre-login session if present, issue fresh 256-bit token
+  const previousToken = req.cookies?.[STUDENT_SESSION_COOKIE];
+  if (previousToken) {
+    db.deleteSession(previousToken);
   }
 
   const rawToken = crypto.randomBytes(32).toString('hex');
   db.createSession(rawToken, user.id, user.role, 24 * 7, req.ip, req.headers['user-agent']);
 
-  res.cookie(STUDENT_SESSION_COOKIE, rawToken, {
-    httpOnly: true,
-    secure: false,
-    sameSite: 'lax',
-    maxAge: 7 * 24 * 60 * 60 * 1000,
+  res.cookie(STUDENT_SESSION_COOKIE, rawToken, STUDENT_SESSION_COOKIE_OPTIONS);
+
+  db.logAudit({
+    actorId: user.id,
+    actorRole: 'student',
+    action: 'OTP_VERIFY_SUCCESS',
+    targetType: 'auth',
+    targetId: user.id,
+    ipAddress: req.ip,
+    userAgent: req.headers['user-agent'],
   });
 
+  // 6. Return only contract user shape (NO tokens in body)
   res.json({
-    success: true,
-    token: rawToken, // Provided for direct programmatic testing
-    user: {
-      id: user.id,
-      name: user.full_name,
-      email: user.email,
-      phone: user.phone,
-      enrollmentNumber: user.icfai_enrollment,
-      course: user.course,
-      year: user.academic_year,
-      isVerified: user.verification_status === 'verified',
-      createdAt: user.created_at,
-    },
+    requiresProfileCompletion: !user.profile_complete,
+    user: toUserProfile(user),
   });
 });
 
 app.get('/api/auth/me', requireUser, (req: Request, res: Response) => {
-  const user = req.user!;
-  res.json({
-    id: user.id,
-    name: user.fullName,
-    email: user.email,
-    phone: user.phone,
-    enrollmentNumber: user.icfaiEnrollment,
-    course: user.course,
-    year: user.academicYear,
-    isVerified: user.verificationStatus === 'verified',
-  });
+  res.json(toUserProfile(db.getUserById(req.user!.id)));
 });
 
-app.put('/api/auth/profile', requireUser, (req: Request, res: Response) => {
-  const parseResult = ProfileCompletionSchema.safeParse(req.body);
+// Profile completion controller.
+const handleProfileUpdate = (req: Request, res: Response) => {
+  const parseResult = createProfileCompletionSchema(
+    env.ENROLLMENT_FORMAT_REGEX,
+    env.ENROLLMENT_FORMAT_EXAMPLE
+  ).safeParse(req.body);
   if (!parseResult.success) {
     return res.status(400).json({
       error: 'Validation failed',
       details: parseResult.error.flatten().fieldErrors,
+      code: 'VALIDATION_FAILED',
     });
   }
 
   const data = parseResult.data;
-  const updated = db.updateUser(req.user!.id, {
-    fullName: data.name,
-    phone: data.phone,
-    course: data.course,
-    academicYear: data.year,
-    icfaiEnrollment: data.enrollmentNumber,
-    verificationStatus: 'verified',
-  });
+
+  // Ensure enrollment number is unique across users (non-leaking error message)
+  const normalizedEnrollment = data.enrollmentNumber.trim().toUpperCase();
+  const existing = db.getUserByEnrollment(normalizedEnrollment);
+  if (existing && existing.id !== req.user!.id) {
+    return res.status(409).json({
+      error: 'This enrollment number is already registered in the system. If this is an error, please submit a manual verification request.',
+      code: 'ENROLLMENT_CONFLICT',
+    });
+  }
+
+  let updated;
+  try {
+    updated = db.updateUser(req.user!.id, {
+      fullName: data.name.trim(),
+      phone: data.phone,
+      course: data.course.trim(),
+      academicYear: data.year,
+      icfaiEnrollment: normalizedEnrollment,
+      profileComplete: 1,
+    });
+  } catch (error: any) {
+    if (error?.code === 'SQLITE_CONSTRAINT_UNIQUE') {
+      return res.status(409).json({
+        error: 'This enrollment number is already registered. If this is an error, submit a manual verification request.',
+        code: 'ENROLLMENT_CONFLICT',
+      });
+    }
+    throw error;
+  }
 
   db.logAudit({
     actorId: req.user!.id,
@@ -338,15 +522,43 @@ app.put('/api/auth/profile', requireUser, (req: Request, res: Response) => {
     userAgent: req.headers['user-agent'],
   });
 
-  res.json({
-    id: updated.id,
-    name: updated.full_name,
-    email: updated.email,
-    phone: updated.phone,
-    enrollmentNumber: updated.icfai_enrollment,
-    course: updated.course,
-    year: updated.academic_year,
-    isVerified: updated.verification_status === 'verified',
+  res.json(toUserProfile(updated));
+};
+
+app.put('/api/users/me/profile', requireUser, requireEmailVerified, handleProfileUpdate);
+
+app.post('/api/auth/manual-verification-request', authLimiter, (req: Request, res: Response) => {
+  const parseResult = createManualVerificationRequestSchema(
+    env.ENROLLMENT_FORMAT_REGEX,
+    env.ENROLLMENT_FORMAT_EXAMPLE
+  ).safeParse(req.body);
+  if (!parseResult.success) {
+    return res.status(400).json({
+      error: 'Validation failed for manual verification request',
+      details: parseResult.error.flatten().fieldErrors,
+      code: 'VALIDATION_FAILED',
+    });
+  }
+
+  const data = parseResult.data;
+
+  const created = db.createManualVerificationRequest(data);
+
+  db.logAudit({
+    actorId: crypto.createHash('sha256').update(data.alternateEmail.toLowerCase()).digest('hex').substring(0, 16),
+    actorRole: 'student',
+    action: 'MANUAL_VERIFICATION_REQUESTED',
+    targetType: 'verification',
+    targetId: created.id,
+    ipAddress: req.ip,
+    userAgent: req.headers['user-agent'],
+  });
+
+  // Never auto-approve and do not issue a session
+  res.status(201).json({
+    success: true,
+    message: 'Your verification request has been received. A campus coordinator will review your documents manually.',
+    requestId: created.id,
   });
 });
 
@@ -355,10 +567,22 @@ app.post('/api/auth/logout', (req: Request, res: Response) => {
   if (!token && req.headers.authorization?.startsWith('Bearer ')) {
     token = req.headers.authorization.split(' ')[1];
   }
+  const session = token ? db.getSession(token) : null;
   if (token) {
     db.deleteSession(token);
   }
-  res.clearCookie(STUDENT_SESSION_COOKIE);
+  res.clearCookie(STUDENT_SESSION_COOKIE, STUDENT_SESSION_COOKIE_CLEAR_OPTIONS);
+
+  db.logAudit({
+    actorId: session?.user_id || 'student',
+    actorRole: 'student',
+    action: 'LOGOUT',
+    targetType: 'auth',
+    targetId: 'session',
+    ipAddress: req.ip,
+    userAgent: req.headers['user-agent'],
+  });
+
   res.json({ success: true, message: 'Logged out successfully' });
 });
 
@@ -582,17 +806,32 @@ app.post('/api/pricing/calculate', (req: Request, res: Response) => {
 // ----------------------------------------------------
 // BOOKINGS (STUDENT & ADMIN PROTECTED)
 // ----------------------------------------------------
-app.post('/api/bookings', requireUser, bookingLimiter, (req: Request, res: Response) => {
-  const parseResult = BookingCreateSchema.safeParse(req.body);
-  if (!parseResult.success) {
-    return res.status(400).json({
-      error: 'Validation failed for booking submission',
-      details: parseResult.error.flatten().fieldErrors,
-    });
-  }
+app.post(
+  '/api/bookings',
+  requireUser,
+  requireEmailVerified,
+  requireProfileComplete,
+  bookingLimiter,
+  (req: Request, res: Response) => {
+    // Clear hook: Driving licence verification required by campus coordinator
+    const REQUIRE_ADMIN_APPROVED_LICENCE = true; // Admin verification flow/UI will manage this flag.
+    if (REQUIRE_ADMIN_APPROVED_LICENCE && !req.user!.drivingLicenceVerified) {
+      return res.status(403).json({
+        error: 'Your driving licence must be verified by a campus coordinator before booking.',
+        code: 'LICENCE_VERIFICATION_REQUIRED',
+      });
+    }
 
-  const data = parseResult.data;
-  const user = req.user!;
+    const parseResult = BookingCreateSchema.safeParse(req.body);
+    if (!parseResult.success) {
+      return res.status(400).json({
+        error: 'Validation failed for booking submission',
+        details: parseResult.error.flatten().fieldErrors,
+      });
+    }
+
+    const data = parseResult.data;
+    const user = req.user!;
 
   // 1. Cap concurrent pending bookings per user (max 3)
   const userBookings = db.getBookings(user.id);
@@ -756,7 +995,13 @@ app.post('/api/bookings/:id/cancel', requireUser, (req: Request, res: Response) 
 // ----------------------------------------------------
 // OWNER ONBOARDING (AUTHENTICATED STUDENT REQUIRED)
 // ----------------------------------------------------
-app.post('/api/owner/onboard', requireUser, ownerLimiter, (req: Request, res: Response) => {
+app.post(
+  '/api/owner/onboard',
+  requireUser,
+  requireEmailVerified,
+  requireProfileComplete,
+  ownerLimiter,
+  (req: Request, res: Response) => {
   const parseResult = OwnerOnboardingSchema.safeParse(req.body);
   if (!parseResult.success) {
     return res.status(400).json({

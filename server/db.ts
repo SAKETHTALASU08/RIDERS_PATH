@@ -14,6 +14,10 @@ if (!fs.existsSync(dbDir)) {
 
 export const sqlite = new Database(dbPath);
 
+function otpEmailKey(email: string): string {
+  return crypto.createHash('sha256').update(email.toLowerCase().trim()).digest('hex');
+}
+
 // Enable WAL mode and foreign keys for high performance and integrity
 sqlite.pragma('journal_mode = WAL');
 sqlite.pragma('foreign_keys = ON');
@@ -25,13 +29,16 @@ export function runMigrations() {
   sqlite.exec(`
     CREATE TABLE IF NOT EXISTS users (
       id TEXT PRIMARY KEY,
-      full_name TEXT NOT NULL,
+      full_name TEXT,
       email TEXT UNIQUE NOT NULL,
-      phone TEXT NOT NULL,
-      icfai_enrollment TEXT UNIQUE NOT NULL,
-      academic_year TEXT NOT NULL,
-      course TEXT NOT NULL,
+      phone TEXT,
+      icfai_enrollment TEXT UNIQUE,
+      academic_year TEXT DEFAULT '1st Year',
+      course TEXT,
       role TEXT NOT NULL DEFAULT 'student',
+      email_verified INTEGER NOT NULL DEFAULT 0,
+      profile_complete INTEGER NOT NULL DEFAULT 0,
+      driving_licence_verified INTEGER NOT NULL DEFAULT 0,
       verification_status TEXT NOT NULL DEFAULT 'unverified',
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
@@ -125,7 +132,26 @@ export function runMigrations() {
       expires_at TEXT NOT NULL,
       consumed INTEGER NOT NULL DEFAULT 0,
       attempts INTEGER NOT NULL DEFAULT 0,
+      delivery_state TEXT NOT NULL DEFAULT 'READY',
       created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS otp_send_logs (
+      id TEXT PRIMARY KEY,
+      email TEXT NOT NULL,
+      ip_address TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS manual_verification_requests (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      enrollment_number TEXT NOT NULL,
+      alternate_email TEXT NOT NULL,
+      note TEXT,
+      status TEXT NOT NULL DEFAULT 'PENDING',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
     );
 
     CREATE TABLE IF NOT EXISTS verifications (
@@ -166,7 +192,82 @@ export function runMigrations() {
     CREATE INDEX IF NOT EXISTS idx_bookings_renter ON bookings (renter_id, booking_status);
     CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions (expires_at);
     CREATE INDEX IF NOT EXISTS idx_otp_email_expires ON otp_codes (email, expires_at);
+    CREATE INDEX IF NOT EXISTS idx_otp_send_logs_email ON otp_send_logs (email, created_at);
+    CREATE INDEX IF NOT EXISTS idx_otp_send_logs_ip ON otp_send_logs (ip_address, created_at);
   `);
+
+  // Earlier versions stored raw addresses in send-limit records. Keep only SHA-256 keys.
+  const legacyOtpSendLogs = sqlite
+    .prepare('SELECT id, email FROM otp_send_logs')
+    .all() as Array<{ id: string; email: string }>;
+  const migrateOtpSendLog = sqlite.prepare('UPDATE otp_send_logs SET email = ? WHERE id = ?');
+  const migrateOtpSendLogs = sqlite.transaction((rows: Array<{ id: string; email: string }>) => {
+    for (const row of rows) {
+      if (!/^[a-f0-9]{64}$/i.test(row.email)) {
+        migrateOtpSendLog.run(otpEmailKey(row.email), row.id);
+      }
+    }
+  });
+  migrateOtpSendLogs(legacyOtpSendLogs);
+
+  const otpColumns = sqlite.prepare('PRAGMA table_info(otp_codes)').all() as Array<{ name: string }>;
+  if (!otpColumns.some((column) => column.name === 'delivery_state')) {
+    // Existing active challenges were already delivered by the old synchronous flow.
+    sqlite.exec("ALTER TABLE otp_codes ADD COLUMN delivery_state TEXT NOT NULL DEFAULT 'READY'");
+  }
+
+  // Migrate existing users table columns and constraints if table pre-existed
+  const userColumns = sqlite.prepare("PRAGMA table_info(users)").all() as any[];
+  const columnNames = userColumns.map((c) => c.name);
+
+  if (!columnNames.includes('email_verified')) {
+    sqlite.exec("ALTER TABLE users ADD COLUMN email_verified INTEGER NOT NULL DEFAULT 0");
+  }
+  if (!columnNames.includes('profile_complete')) {
+    sqlite.exec("ALTER TABLE users ADD COLUMN profile_complete INTEGER NOT NULL DEFAULT 0");
+  }
+  if (!columnNames.includes('driving_licence_verified')) {
+    sqlite.exec("ALTER TABLE users ADD COLUMN driving_licence_verified INTEGER NOT NULL DEFAULT 0");
+  }
+
+  // Ensure icfai_enrollment is nullable to allow pre-profile signup
+  const enrollmentCol = userColumns.find((c) => c.name === 'icfai_enrollment');
+  if (enrollmentCol && enrollmentCol.notnull === 1) {
+    sqlite.exec(`
+      PRAGMA foreign_keys = OFF;
+      CREATE TABLE users_migrated (
+        id TEXT PRIMARY KEY,
+        full_name TEXT,
+        email TEXT UNIQUE NOT NULL,
+        phone TEXT,
+        icfai_enrollment TEXT UNIQUE,
+        academic_year TEXT DEFAULT '1st Year',
+        course TEXT,
+        role TEXT NOT NULL DEFAULT 'student',
+        email_verified INTEGER NOT NULL DEFAULT 0,
+        profile_complete INTEGER NOT NULL DEFAULT 0,
+        driving_licence_verified INTEGER NOT NULL DEFAULT 0,
+        verification_status TEXT NOT NULL DEFAULT 'unverified',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      INSERT OR IGNORE INTO users_migrated (
+        id, full_name, email, phone, icfai_enrollment, academic_year, course, role,
+        email_verified, profile_complete, driving_licence_verified, verification_status,
+        created_at, updated_at
+      )
+      SELECT
+        id, full_name, email, phone, icfai_enrollment, academic_year, course, role,
+        COALESCE(email_verified, 0),
+        COALESCE(profile_complete, CASE WHEN full_name IS NOT NULL AND full_name != '' THEN 1 ELSE 0 END),
+        COALESCE(driving_licence_verified, 0),
+        verification_status, created_at, updated_at
+      FROM users;
+      DROP TABLE users;
+      ALTER TABLE users_migrated RENAME TO users;
+      PRAGMA foreign_keys = ON;
+    `);
+  }
 
   // Seed default admin config if missing
   const existingConfig = sqlite.prepare('SELECT key FROM config WHERE key = ?').get('platform_config');
@@ -174,7 +275,6 @@ export function runMigrations() {
     const publicConfig = {
       appName: 'Riders Path',
       campusName: 'ICFAI Foundation for Higher Education, Hyderabad',
-      allowedEmailDomain: 'icfaiuniversity.in',
       termsVersion: 'v2.1-campus-2026',
       privacyVersion: 'v1.4-privacy-2026',
       platformFeePercent: 8,
@@ -189,6 +289,44 @@ export function runMigrations() {
     );
   }
 
+  // One-time correction for the bundled demo owner from older schemas. Do not reset review
+  // state on every process start; subsequent admin approval must persist.
+  const seedReviewMigration = sqlite
+    .prepare("SELECT key FROM config WHERE key = 'seed_owner_review_state_v1'")
+    .get();
+  if (!seedReviewMigration) {
+    sqlite.transaction(() => {
+      sqlite.prepare(`
+        UPDATE users
+        SET driving_licence_verified = 0, verification_status = 'unverified'
+        WHERE id = 'usr_owner_student_01'
+      `).run();
+      sqlite.prepare('INSERT INTO config (key, value, is_secret, updated_at) VALUES (?, ?, ?, ?)').run(
+        'seed_owner_review_state_v1',
+        'applied',
+        1,
+        new Date().toISOString()
+      );
+    })();
+  }
+
+  // Revoke sessions created by the removed student enrollment/dev login flow.
+  // Keep admin sessions intact because admin authentication is unchanged here.
+  const studentSessionCutover = sqlite
+    .prepare("SELECT key FROM config WHERE key = 'student_session_security_cutover_v1'")
+    .get();
+  if (!studentSessionCutover) {
+    sqlite.transaction(() => {
+      sqlite.prepare("DELETE FROM sessions WHERE role != 'admin'").run();
+      sqlite.prepare('INSERT INTO config (key, value, is_secret, updated_at) VALUES (?, ?, ?, ?)').run(
+        'student_session_security_cutover_v1',
+        'applied',
+        1,
+        new Date().toISOString()
+      );
+    })();
+  }
+
   // Seed initial fleet if bikes table is empty
   const bikeCount = (sqlite.prepare('SELECT COUNT(*) as count FROM bikes').get() as { count: number }).count;
   if (bikeCount === 0) {
@@ -201,20 +339,26 @@ function seedInitialData() {
 
   // Create system admin and initial student owner
   const insertUser = sqlite.prepare(`
-    INSERT OR IGNORE INTO users (id, full_name, email, phone, icfai_enrollment, academic_year, course, role, verification_status, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT OR IGNORE INTO users (
+      id, full_name, email, phone, icfai_enrollment, academic_year, course, role,
+      email_verified, profile_complete, driving_licence_verified, verification_status,
+      created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
   insertUser.run(
     'usr_system_admin',
     'Campus Fleet Administrator',
-    'fleet.admin@icfaiuniversity.in',
+    'fleet.admin@campus.example.edu',
     '+91 99999 00000',
     'ADMIN-ICFAI',
     'Faculty/Staff',
     'Campus Transport Desk',
     'admin',
-    'verified',
+    0,
+    0,
+    0,
+    'unverified',
     now,
     now
   );
@@ -222,13 +366,16 @@ function seedInitialData() {
   insertUser.run(
     'usr_owner_student_01',
     'Suhash Reddy',
-    'suhash.reddy@icfaiuniversity.in',
+    'suhash.reddy@student.example.edu',
     '+91 98480 11223',
-    '21BSPH0101',
+    'ABCD-123',
     '3rd Year',
     'B.Tech CSE',
     'owner',
-    'verified',
+    0,
+    1,
+    0,
+    'unverified',
     now,
     now
   );
@@ -384,31 +531,41 @@ export const db = {
 
   createUser(data: {
     id?: string;
-    fullName: string;
+    fullName?: string;
     email: string;
-    phone: string;
-    icfaiEnrollment: string;
-    academicYear: string;
-    course: string;
+    phone?: string;
+    icfaiEnrollment?: string | null;
+    academicYear?: string;
+    course?: string;
     role?: string;
+    emailVerified?: boolean | number;
+    profileComplete?: boolean | number;
+    drivingLicenceVerified?: boolean | number;
     verificationStatus?: string;
   }) {
     const id = data.id || 'usr_' + crypto.randomBytes(8).toString('hex');
     const now = new Date().toISOString();
     sqlite
       .prepare(`
-        INSERT INTO users (id, full_name, email, phone, icfai_enrollment, academic_year, course, role, verification_status, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO users (
+          id, full_name, email, phone, icfai_enrollment, academic_year, course, role,
+          email_verified, profile_complete, driving_licence_verified, verification_status,
+          created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `)
       .run(
         id,
-        data.fullName,
-        data.email.toLowerCase(),
-        data.phone,
-        data.icfaiEnrollment.toUpperCase(),
-        data.academicYear,
-        data.course,
+        data.fullName || null,
+        data.email.toLowerCase().trim(),
+        data.phone || null,
+        data.icfaiEnrollment ? data.icfaiEnrollment.toUpperCase().trim() : null,
+        data.academicYear || '1st Year',
+        data.course || null,
         data.role || 'student',
+        data.emailVerified ? 1 : 0,
+        data.profileComplete ? 1 : 0,
+        data.drivingLicenceVerified ? 1 : 0,
         data.verificationStatus || 'unverified',
         now,
         now
@@ -416,7 +573,22 @@ export const db = {
     return this.getUserById(id);
   },
 
-  updateUser(id: string, updates: Partial<{ fullName: string; phone: string; course: string; academicYear: string; icfaiEnrollment: string; verificationStatus: string }>) {
+  updateUser(
+    id: string,
+    updates: Partial<{
+      fullName: string;
+      email: string;
+      phone: string;
+      course: string;
+      academicYear: string;
+      icfaiEnrollment: string | null;
+      emailVerified: boolean | number;
+      profileComplete: boolean | number;
+      drivingLicenceVerified: boolean | number;
+      verificationStatus: string;
+      role: string;
+    }>
+  ) {
     const user = this.getUserById(id);
     if (!user) return null;
 
@@ -426,6 +598,10 @@ export const db = {
     if (updates.fullName !== undefined) {
       fields.push('full_name = ?');
       values.push(updates.fullName);
+    }
+    if (updates.email !== undefined) {
+      fields.push('email = ?');
+      values.push(updates.email.toLowerCase().trim());
     }
     if (updates.phone !== undefined) {
       fields.push('phone = ?');
@@ -441,11 +617,27 @@ export const db = {
     }
     if (updates.icfaiEnrollment !== undefined) {
       fields.push('icfai_enrollment = ?');
-      values.push(updates.icfaiEnrollment);
+      values.push(updates.icfaiEnrollment ? updates.icfaiEnrollment.toUpperCase().trim() : null);
+    }
+    if (updates.emailVerified !== undefined) {
+      fields.push('email_verified = ?');
+      values.push(updates.emailVerified ? 1 : 0);
+    }
+    if (updates.profileComplete !== undefined) {
+      fields.push('profile_complete = ?');
+      values.push(updates.profileComplete ? 1 : 0);
+    }
+    if (updates.drivingLicenceVerified !== undefined) {
+      fields.push('driving_licence_verified = ?');
+      values.push(updates.drivingLicenceVerified ? 1 : 0);
     }
     if (updates.verificationStatus !== undefined) {
       fields.push('verification_status = ?');
       values.push(updates.verificationStatus);
+    }
+    if (updates.role !== undefined) {
+      fields.push('role = ?');
+      values.push(updates.role);
     }
 
     if (fields.length === 0) return user;
@@ -454,7 +646,17 @@ export const db = {
     values.push(new Date().toISOString());
     values.push(id);
 
-    sqlite.prepare(`UPDATE users SET ${fields.join(', ')} WHERE id = ?`).run(...values);
+    const invalidateSessions = (
+      (updates.email !== undefined && updates.email.trim().toLowerCase() !== user.email.toLowerCase()) ||
+      (updates.role !== undefined && updates.role !== user.role)
+    );
+    sqlite.transaction(() => {
+      sqlite.prepare(`UPDATE users SET ${fields.join(', ')} WHERE id = ?`).run(...values);
+      if (invalidateSessions) {
+        // Email and role changes invalidate all outstanding authentication state.
+        sqlite.prepare('DELETE FROM sessions WHERE user_id = ?').run(id);
+      }
+    })();
     return this.getUserById(id);
   },
 
@@ -494,53 +696,230 @@ export const db = {
     sqlite.prepare('DELETE FROM sessions WHERE id = ?').run(hashedId);
   },
 
-  // OTP Codes
-  storeOtp(email: string, code: string, validityMinutes = 5) {
+  deleteAllUserSessions(userId: string) {
+    sqlite.prepare('DELETE FROM sessions WHERE user_id = ?').run(userId);
+  },
+
+  // OTP Codes & Rate Limits (HMAC-SHA256 & Persistent Send Logs)
+  invalidateEarlierOtpCodes(email: string) {
+    sqlite
+      .prepare('UPDATE otp_codes SET consumed = 1 WHERE LOWER(email) = LOWER(?) AND consumed = 0')
+      .run(email.trim());
+  },
+
+  storeOtp(email: string, codeHash: string, validityMinutes = 10, deliveryState: 'PENDING' | 'READY' = 'READY') {
     const id = 'otp_' + crypto.randomBytes(8).toString('hex');
-    const codeHash = crypto.createHash('sha256').update(code).digest('hex');
     const now = new Date();
     const expiresAt = new Date(now.getTime() + validityMinutes * 60 * 1000).toISOString();
 
     sqlite
       .prepare(`
-        INSERT INTO otp_codes (id, email, code_hash, expires_at, consumed, attempts, created_at)
-        VALUES (?, ?, ?, ?, 0, 0, ?)
+        INSERT INTO otp_codes (id, email, code_hash, expires_at, consumed, attempts, delivery_state, created_at)
+        VALUES (?, ?, ?, ?, 0, 0, ?, ?)
       `)
-      .run(id, email.toLowerCase(), codeHash, expiresAt, now.toISOString());
+      .run(id, email.toLowerCase().trim(), codeHash, expiresAt, deliveryState, now.toISOString());
 
     return { id, expiresAt };
   },
 
-  verifyOtp(email: string, code: string): boolean {
-    const codeHash = crypto.createHash('sha256').update(code).digest('hex');
+  getActiveOtp(email: string) {
     const now = new Date().toISOString();
-
-    // Check unconsumed valid OTP
-    const row = sqlite
+    return sqlite
       .prepare(`
         SELECT * FROM otp_codes
-        WHERE LOWER(email) = LOWER(?) AND consumed = 0 AND expires_at > ?
+        WHERE LOWER(email) = LOWER(?) AND consumed = 0 AND delivery_state = 'READY' AND expires_at > ?
         ORDER BY created_at DESC LIMIT 1
       `)
-      .get(email, now) as any;
+      .get(email.trim(), now) as any;
+  },
 
-    if (!row) return false;
+  getLatestOtp(email: string) {
+    return sqlite
+      .prepare(`
+        SELECT * FROM otp_codes
+        WHERE LOWER(email) = LOWER(?)
+        ORDER BY created_at DESC LIMIT 1
+      `)
+      .get(email.trim()) as any;
+  },
 
-    // Increment attempts
-    sqlite.prepare('UPDATE otp_codes SET attempts = attempts + 1 WHERE id = ?').run(row.id);
+  /** Atomically consumes a valid code or records one failed attempt. */
+  applyOtpVerification(
+    id: string,
+    codeMatches: boolean,
+    maxAttempts: number
+  ): { status: 'verified' } | { status: 'failed'; attempts: number } | { status: 'locked'; attempts: number } | { status: 'inactive' } {
+    const transaction = sqlite.transaction(() => {
+      const otp = sqlite.prepare('SELECT * FROM otp_codes WHERE id = ?').get(id) as any;
+      const now = new Date().toISOString();
+      if (!otp || otp.consumed || otp.delivery_state !== 'READY' || otp.expires_at <= now) {
+        return { status: 'inactive' as const };
+      }
 
-    if (row.attempts >= 5) {
-      // Lockout code
-      sqlite.prepare('UPDATE otp_codes SET consumed = 1 WHERE id = ?').run(row.id);
-      return false;
-    }
+      if (otp.attempts >= maxAttempts) {
+        sqlite.prepare('UPDATE otp_codes SET consumed = 1 WHERE id = ?').run(id);
+        return { status: 'locked' as const, attempts: otp.attempts as number };
+      }
 
-    if (row.code_hash === codeHash) {
-      sqlite.prepare('UPDATE otp_codes SET consumed = 1 WHERE id = ?').run(row.id);
-      return true;
-    }
+      if (codeMatches) {
+        sqlite.prepare('DELETE FROM otp_codes WHERE id = ?').run(id);
+        return { status: 'verified' as const };
+      }
 
-    return false;
+      const attempts = otp.attempts + 1;
+      sqlite.prepare('UPDATE otp_codes SET attempts = ?, consumed = ? WHERE id = ?').run(
+        attempts,
+        attempts >= maxAttempts ? 1 : 0,
+        id
+      );
+      return attempts >= maxAttempts
+        ? { status: 'locked' as const, attempts }
+        : { status: 'failed' as const, attempts };
+    });
+
+    return transaction.immediate();
+  },
+
+  incrementOtpAttempts(id: string) {
+    sqlite.prepare('UPDATE otp_codes SET attempts = attempts + 1 WHERE id = ?').run(id);
+    const updated = sqlite.prepare('SELECT attempts FROM otp_codes WHERE id = ?').get(id) as { attempts: number } | undefined;
+    return updated ? updated.attempts : 1;
+  },
+
+  consumeOtp(id: string) {
+    sqlite.prepare('UPDATE otp_codes SET consumed = 1 WHERE id = ?').run(id);
+  },
+
+  deleteOtp(id: string) {
+    sqlite.prepare('DELETE FROM otp_codes WHERE id = ?').run(id);
+  },
+
+  markOtpReady(id: string) {
+    sqlite
+      .prepare("UPDATE otp_codes SET delivery_state = 'READY' WHERE id = ? AND consumed = 0 AND expires_at > ?")
+      .run(id, new Date().toISOString());
+  },
+
+  logOtpSend(email: string, ipAddress: string) {
+    const id = 'send_' + crypto.randomBytes(8).toString('hex');
+    const now = new Date().toISOString();
+    sqlite
+      .prepare('INSERT INTO otp_send_logs (id, email, ip_address, created_at) VALUES (?, ?, ?, ?)')
+      .run(id, otpEmailKey(email), ipAddress || '127.0.0.1', now);
+  },
+
+  /** Atomically applies durable email/IP send limits and reserves one send slot. */
+  reserveOtpSend(
+    email: string,
+    ipAddress: string,
+    limits: { cooldownSeconds: number; maxPerEmailPerHour: number; maxPerIpPerHour: number }
+  ): { allowed: true } | { allowed: false; retryAfterSeconds: number } {
+    const normalizedEmail = email.toLowerCase().trim();
+    const emailKey = otpEmailKey(normalizedEmail);
+    const clientIp = ipAddress || '127.0.0.1';
+    const transaction = sqlite.transaction(() => {
+      const nowMs = Date.now();
+      const oneHourAgo = new Date(nowMs - 60 * 60 * 1000).toISOString();
+      const emailCount = sqlite
+        .prepare('SELECT COUNT(*) as count FROM otp_send_logs WHERE email = ? AND created_at >= ?')
+        .get(emailKey, oneHourAgo) as { count: number };
+
+      if (emailCount.count >= limits.maxPerEmailPerHour) {
+        const oldest = sqlite
+          .prepare('SELECT MIN(created_at) as created_at FROM otp_send_logs WHERE email = ? AND created_at >= ?')
+          .get(emailKey, oneHourAgo) as { created_at: string | null };
+        const elapsed = oldest.created_at ? Math.floor((nowMs - new Date(oldest.created_at).getTime()) / 1000) : 0;
+        return { allowed: false as const, retryAfterSeconds: Math.max(1, 3600 - elapsed) };
+      }
+
+      const lastEmailSend = sqlite
+        .prepare('SELECT created_at FROM otp_send_logs WHERE email = ? ORDER BY created_at DESC LIMIT 1')
+        .get(emailKey) as { created_at: string } | undefined;
+      if (lastEmailSend) {
+        const elapsed = Math.floor((nowMs - new Date(lastEmailSend.created_at).getTime()) / 1000);
+        if (elapsed < limits.cooldownSeconds) {
+          return { allowed: false as const, retryAfterSeconds: limits.cooldownSeconds - elapsed };
+        }
+      }
+
+      const ipCount = sqlite
+        .prepare('SELECT COUNT(*) as count FROM otp_send_logs WHERE ip_address = ? AND created_at >= ?')
+        .get(clientIp, oneHourAgo) as { count: number };
+      if (ipCount.count >= limits.maxPerIpPerHour) {
+        const oldest = sqlite
+          .prepare('SELECT MIN(created_at) as created_at FROM otp_send_logs WHERE ip_address = ? AND created_at >= ?')
+          .get(clientIp, oneHourAgo) as { created_at: string | null };
+        const elapsed = oldest.created_at ? Math.floor((nowMs - new Date(oldest.created_at).getTime()) / 1000) : 0;
+        return { allowed: false as const, retryAfterSeconds: Math.max(1, 3600 - elapsed) };
+      }
+
+      const id = 'send_' + crypto.randomBytes(8).toString('hex');
+      sqlite
+        .prepare('INSERT INTO otp_send_logs (id, email, ip_address, created_at) VALUES (?, ?, ?, ?)')
+        .run(id, emailKey, clientIp, new Date(nowMs).toISOString());
+      return { allowed: true as const };
+    });
+
+    return transaction.immediate();
+  },
+
+  getOtpSendsInLastHour(email: string): number {
+    const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+    const res = sqlite
+      .prepare('SELECT COUNT(*) as count FROM otp_send_logs WHERE email = ? AND created_at >= ?')
+      .get(otpEmailKey(email), oneHourAgo) as { count: number };
+    return res ? res.count : 0;
+  },
+
+  getIpOtpSendsInLastHour(ipAddress: string): number {
+    const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+    const res = sqlite
+      .prepare('SELECT COUNT(*) as count FROM otp_send_logs WHERE ip_address = ? AND created_at >= ?')
+      .get(ipAddress || '127.0.0.1', oneHourAgo) as { count: number };
+    return res ? res.count : 0;
+  },
+
+  getLastOtpSendTime(email: string): Date | null {
+    const row = sqlite
+      .prepare('SELECT created_at FROM otp_send_logs WHERE email = ? ORDER BY created_at DESC LIMIT 1')
+      .get(otpEmailKey(email)) as { created_at: string } | undefined;
+    return row ? new Date(row.created_at) : null;
+  },
+
+  // Manual Verification Fallback Requests
+  createManualVerificationRequest(data: {
+    name: string;
+    enrollmentNumber: string;
+    alternateEmail: string;
+    note?: string;
+  }) {
+    const id = 'mvr_' + crypto.randomBytes(8).toString('hex');
+    const now = new Date().toISOString();
+    sqlite
+      .prepare(`
+        INSERT INTO manual_verification_requests (id, name, enrollment_number, alternate_email, note, status, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, 'PENDING', ?, ?)
+      `)
+      .run(
+        id,
+        data.name.trim(),
+        data.enrollmentNumber.trim().toUpperCase(),
+        data.alternateEmail.trim().toLowerCase(),
+        data.note ? data.note.trim() : null,
+        now,
+        now
+      );
+
+    return {
+      id,
+      name: data.name.trim(),
+      enrollmentNumber: data.enrollmentNumber.trim().toUpperCase(),
+      alternateEmail: data.alternateEmail.trim().toLowerCase(),
+      note: data.note || null,
+      status: 'PENDING',
+      createdAt: now,
+      updatedAt: now,
+    };
   },
 
   // Bikes

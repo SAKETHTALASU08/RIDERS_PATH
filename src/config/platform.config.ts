@@ -6,8 +6,6 @@
 export interface PlatformConfig {
   appName: string;
   campusName: string;
-  allowedEmailDomain: string;
-  enrollmentRegex: RegExp;
   phoneRegex: RegExp;
   termsVersion: string;
   privacyVersion: string;
@@ -29,10 +27,7 @@ export interface PlatformConfig {
 export const PLATFORM_CONFIG: PlatformConfig = {
   appName: 'Riders Path',
   campusName: 'ICFAI Foundation for Higher Education, Hyderabad',
-  allowedEmailDomain: 'icfaiuniversity.in',
-  // Format: 2-digit year + 2-4 letter faculty/program + 3-5 digits (e.g. 21BSPH0102)
-  enrollmentRegex: /^[0-9]{2}[A-Za-z]{2,4}[0-9]{3,6}$/,
-  // Standard Indian 10-digit mobile number format
+  // Standard Indian 10-digit mobile number format.
   phoneRegex: /^[6-9][0-9]{9}$/,
   termsVersion: 'v2.1-campus-2026',
   privacyVersion: 'v1.4-privacy-2026',

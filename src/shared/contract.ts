@@ -1,5 +1,9 @@
 import { z } from 'zod';
-import { PLATFORM_CONFIG } from '../config/platform.config';
+import {
+  createEnrollmentZodSchema,
+  DEFAULT_ENROLLMENT_EXAMPLE,
+  IndianPhoneSchema,
+} from './validators';
 
 // ----------------------------------------------------
 // ENUMS & PRIMITIVES
@@ -77,62 +81,81 @@ export const AvailabilityResponseSchema = z.object({
 export type AvailabilityResponse = z.infer<typeof AvailabilityResponseSchema>;
 
 // ----------------------------------------------------
+// ----------------------------------------------------
 // AUTH & OTP SCHEMAS
 // ----------------------------------------------------
 
 export const OtpRequestSchema = z.object({
-  email: z
-    .string()
-    .email('Invalid email address')
-    .refine(
-      (email) =>
-        email.endsWith(`@${PLATFORM_CONFIG.allowedEmailDomain}`) ||
-        email.endsWith('.icfaiuniversity.in') ||
-        email.endsWith('@ifheindia.org'),
-      {
-        message: `Must use your official campus email (@${PLATFORM_CONFIG.allowedEmailDomain})`,
-      }
-    ),
+  email: z.string().trim().email('Invalid email address'),
 });
 export type OtpRequest = z.infer<typeof OtpRequestSchema>;
 
 export const OtpVerifySchema = z.object({
-  email: z.string().email(),
-  code: z.string().regex(/^[0-9]{6}$/, 'OTP must be exactly 6 digits'),
+  email: z.string().trim().email(),
+  code: z.string().trim().regex(/^[0-9]{6}$/, 'OTP must be exactly 6 numeric digits'),
 });
 export type OtpVerify = z.infer<typeof OtpVerifySchema>;
 
 export const UserProfileSchema = z.object({
   id: z.string(),
   email: z.string().email(),
-  name: z.string().min(2, 'Name must be at least 2 characters'),
-  enrollmentNumber: z
-    .string()
-    .regex(PLATFORM_CONFIG.enrollmentRegex, 'Invalid ICFAI Enrollment Number (e.g. 21BSPH0102)'),
-  phone: z
-    .string()
-    .regex(PLATFORM_CONFIG.phoneRegex, 'Enter a valid 10-digit Indian phone number'),
-  course: z.string().min(2, 'Course / program is required'),
-  year: z.string().min(1, 'Academic year is required'),
+  name: z.string().default(''),
+  enrollmentNumber: z.string().default(''),
+  phone: z.string().default(''),
+  course: z.string().default(''),
+  year: z.string().default('1st Year'),
   isVerified: z.boolean().default(false),
+  emailVerified: z.boolean().default(false),
+  profileComplete: z.boolean().default(false),
   drivingLicenceVerified: z.boolean().default(false),
   studentIdVerified: z.boolean().default(false),
   createdAt: z.string().datetime(),
 });
 export type UserProfile = z.infer<typeof UserProfileSchema>;
 
-export const ProfileCompletionSchema = z.object({
-  name: z.string().min(2, 'Full Name is required'),
-  enrollmentNumber: z
-    .string()
-    .regex(PLATFORM_CONFIG.enrollmentRegex, 'Valid ICFAI Enrollment Number required (e.g. 21BSPH0102)'),
-  phone: z
-    .string()
-    .regex(PLATFORM_CONFIG.phoneRegex, '10-digit Indian mobile number required'),
-  course: z.string().min(2, 'Program/Department is required'),
-  year: z.enum(['1st Year', '2nd Year', '3rd Year', '4th Year', 'Postgraduate']),
+export const OtpRequestResponseSchema = z.object({
+  success: z.literal(true),
+  message: z.string(),
+  cooldownSeconds: z.number().int().nonnegative(),
 });
+export type OtpRequestResponse = z.infer<typeof OtpRequestResponseSchema>;
+
+export const OtpVerifyResponseSchema = z.object({
+  requiresProfileCompletion: z.boolean(),
+  user: UserProfileSchema,
+});
+export type OtpVerifyResponse = z.infer<typeof OtpVerifyResponseSchema>;
+
+export function createProfileCompletionSchema(
+  enrollmentRegex?: string,
+  enrollmentExample = DEFAULT_ENROLLMENT_EXAMPLE
+) {
+  return z.object({
+    name: z.string().trim().min(2, 'Full Name must be at least 2 characters').max(120),
+    enrollmentNumber: createEnrollmentZodSchema(enrollmentRegex, enrollmentExample),
+    phone: IndianPhoneSchema,
+    course: z.string().trim().min(2, 'Program/Department is required').max(120),
+    year: z.enum(['1st Year', '2nd Year', '3rd Year', '4th Year', 'Postgraduate']),
+  });
+}
+
+export const ProfileCompletionSchema = createProfileCompletionSchema();
 export type ProfileCompletion = z.infer<typeof ProfileCompletionSchema>;
+
+export function createManualVerificationRequestSchema(
+  enrollmentRegex?: string,
+  enrollmentExample = DEFAULT_ENROLLMENT_EXAMPLE
+) {
+  return z.object({
+    name: z.string().trim().min(2, 'Full Name is required').max(120),
+    enrollmentNumber: createEnrollmentZodSchema(enrollmentRegex, enrollmentExample),
+    alternateEmail: z.string().trim().email('Valid alternate email address required').max(254),
+    note: z.string().trim().max(500, 'Note cannot exceed 500 characters').optional(),
+  });
+}
+
+export const ManualVerificationRequestSchema = createManualVerificationRequestSchema();
+export type ManualVerificationRequest = z.infer<typeof ManualVerificationRequestSchema>;
 
 // ----------------------------------------------------
 // PRICING & BOOKING SCHEMAS
@@ -242,9 +265,13 @@ export type OwnerListing = z.infer<typeof OwnerListingSchema>;
 // ----------------------------------------------------
 
 export const ApiErrorShapeSchema = z.object({
-  message: z.string(),
+  message: z.string().optional(),
+  error: z.string().optional(),
   code: z.string(),
   fieldErrors: z.record(z.string(), z.string()).optional(),
   status: z.number().optional(),
+  cooldownSeconds: z.number().optional(),
+  retryAfterSeconds: z.number().optional(),
+  attemptsRemaining: z.number().optional(),
 });
 export type ApiErrorShape = z.infer<typeof ApiErrorShapeSchema>;
