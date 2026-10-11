@@ -71,7 +71,7 @@ export const BookingFlowPage: React.FC = () => {
   useEffect(() => () => previewUrls.current.forEach((url) => URL.revokeObjectURL(url)), []);
 
   useEffect(() => {
-    if (!isAuthLoading && user && (!user.emailVerified || !user.profileComplete)) {
+    if (!isAuthLoading && (!user || !user.emailVerified || !user.profileComplete)) {
       navigate('/signin', { replace: true, state: { returnTo: location.pathname, fallbackTo: id ? `/bikes/${id}` : '/browse' } });
     }
   }, [id, isAuthLoading, location.pathname, navigate, user]);
