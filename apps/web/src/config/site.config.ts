@@ -23,10 +23,6 @@ export const ROUTE_METADATA: Record<string, { title: string; description: string
     title: 'My Bookings | Riders Path',
     description: 'Review your booking status, next steps, pickup details, and booking pass.',
   },
-  '/owner': {
-    title: 'List Your Bike | Riders Path',
-    description: 'Submit a bike listing for review and check listing status and earnings.',
-  },
   '/signin': {
     title: 'Student Sign In | Riders Path',
     description: 'Sign in with your campus email using a one-time verification code.',
@@ -37,7 +33,7 @@ export const ROUTE_METADATA: Record<string, { title: string; description: string
   },
   '/faq': {
     title: 'Student Bike Rental FAQ | Riders Path',
-    description: 'Answers about student eligibility, documents, deposits, and listing a two-wheeler.',
+    description: 'Answers about student eligibility, documents, deposits, and campus-hub handovers.',
   },
   '/terms': {
     title: 'Terms | Riders Path',

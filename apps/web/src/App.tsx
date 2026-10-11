@@ -22,9 +22,6 @@ const BookingFlowPage = lazy(() =>
 const MyBookingsPage = lazy(() =>
   import('./pages/MyBookingsPage').then((m) => ({ default: m.MyBookingsPage }))
 );
-const OwnerOnboardPage = lazy(() =>
-  import('./pages/OwnerOnboardPage').then((m) => ({ default: m.OwnerOnboardPage }))
-);
 const TermsPage = lazy(() =>
   import('./pages/StaticPages').then((m) => ({ default: m.TermsPage }))
 );
@@ -64,7 +61,7 @@ export const AppRoutes: React.FC = () => {
   return (
     <ToastProvider>
       <AuthProvider>
-        <PageMetadata noIndex={['/my-bookings', '/owner', '/signin'].includes(location.pathname)} />
+        <PageMetadata noIndex={['/my-bookings', '/signin'].includes(location.pathname)} />
         <div className="min-h-screen flex flex-col bg-neutral-950 text-neutral-100 selection:bg-amber-500 selection:text-slate-950">
           <Navbar />
 
@@ -76,7 +73,6 @@ export const AppRoutes: React.FC = () => {
                 <Route path="/bikes/:id" element={<BikeDetailPage />} />
                 <Route path="/book/:id" element={<BookingFlowPage />} />
                 <Route path="/my-bookings" element={<MyBookingsPage />} />
-                <Route path="/owner" element={<OwnerOnboardPage />} />
                 <Route path="/signin" element={<SignInPage />} />
                 <Route path="/how-it-works" element={<LandingPage />} />
                 <Route path="/terms" element={<TermsPage />} />

@@ -75,10 +75,6 @@ export const LandingPage: React.FC = () => {
       q: 'Which documents should I submit?',
       a: 'The booking flow lists the required documents and explains their purpose before upload. A campus team member reviews submitted documents.',
     },
-    {
-      q: 'Can I list my own two-wheeler to earn?',
-      a: 'Yes. Submit vehicle, registration, insurance, and payout details for review. The owner page shows listing status and earnings information.',
-    },
   ];
 
   return (
@@ -111,13 +107,9 @@ export const LandingPage: React.FC = () => {
               Student-to-student two-wheeler sharing with server-calculated pricing and pickup at a selected campus hub.
             </p>
 
-            <div className="flex flex-col sm:flex-row items-center gap-3 w-full sm:w-auto">
+            <div className="flex w-full justify-center">
               <Link to="/browse" className="inline-flex min-h-[48px] w-full sm:w-auto items-center justify-center gap-2 rounded-lg border border-amber-300/30 bg-amber-400 px-6 py-3 text-base font-semibold text-slate-950 shadow-sm shadow-amber-500/20 transition-all duration-200 hover:-translate-y-0.5 hover:bg-amber-300 hover:shadow-amber-500/30 focus-visible:ring-2 focus-visible:ring-amber-400">
                 Browse Campus Fleet <ArrowRight className="w-4 h-4" aria-hidden="true" />
-              </Link>
-
-              <Link to="/owner" className="inline-flex min-h-[48px] w-full sm:w-auto items-center justify-center rounded-lg border border-neutral-700 bg-neutral-950/35 px-6 py-3 text-base font-medium text-neutral-100 transition-all duration-200 hover:-translate-y-0.5 hover:border-neutral-500 hover:bg-neutral-900/80 focus-visible:ring-2 focus-visible:ring-amber-400">
-                List Your Bike
               </Link>
             </div>
 

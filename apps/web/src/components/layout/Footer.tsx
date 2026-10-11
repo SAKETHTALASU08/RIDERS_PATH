@@ -73,9 +73,6 @@ export const Footer: React.FC = () => {
               <HelpCircle className="w-3.5 h-3.5" />
               <span>Frequently Asked Questions</span>
             </Link>
-            <Link to="/owner" className="hover:text-neutral-200 transition-colors">
-              List Your Two-Wheeler
-            </Link>
             <span className="text-[11px] text-neutral-400 mt-2">
               Hours vary by pickup hub; see the selected hub details.
             </span>
