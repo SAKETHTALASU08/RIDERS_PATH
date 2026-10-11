@@ -170,7 +170,7 @@ export const MyBookingsPage: React.FC = () => {
         <EmptyState
           title="Sign In to View Your Bookings"
           description="Access your active campus gate passes, rental history, and vehicle pickup details."
-          actionLabel="Sign In with Campus Email"
+          actionLabel="Sign In with Email"
           onAction={openAuthModal}
         />
       </div>

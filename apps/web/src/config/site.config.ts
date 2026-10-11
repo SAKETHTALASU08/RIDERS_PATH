@@ -5,7 +5,7 @@ export const SITE_NAME = 'Riders Path';
 export const ROUTE_METADATA: Record<string, { title: string; description: string }> = {
   '/': {
     title: 'Riders Path | Student Bike Sharing at ICFAI Hyderabad',
-    description: 'Browse student-listed two-wheelers, check availability, and arrange pickup at a campus hub. College email is confirmed; licence documents are reviewed by the team.',
+    description: 'Browse student-listed two-wheelers, check availability, and arrange pickup at a campus hub. Email ownership is confirmed; licence documents are reviewed by the team.',
   },
   '/browse': {
     title: 'Browse Bikes | Riders Path',
@@ -25,7 +25,7 @@ export const ROUTE_METADATA: Record<string, { title: string; description: string
   },
   '/signin': {
     title: 'Student Sign In | Riders Path',
-    description: 'Sign in with your campus email using a one-time verification code.',
+    description: 'Sign in with your email using a one-time verification code.',
   },
   '/how-it-works': {
     title: 'How It Works | Riders Path',

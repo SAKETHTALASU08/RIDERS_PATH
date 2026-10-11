@@ -27,7 +27,7 @@ const EnvSchema = z.object({
   DOCUMENT_CONSENT_VERSION: z.string().default('documents-2026-10-v1'),
   GEMINI_API_KEY: z.string().optional(),
 
-  // Configure only with the actual campus domains. Empty means OTP is unavailable.
+  // Optional legacy setting. OTP accepts every valid email address.
   ALLOWED_EMAIL_DOMAINS: z.string().optional(),
 
   // Enrollment Format Configuration
@@ -115,13 +115,6 @@ try {
     console.error('❌ Environment validation failed:', error);
   }
   process.exit(1);
-}
-
-// Fail-closed startup warning if email domains are not configured
-if (!envConfig.ALLOWED_EMAIL_DOMAINS || envConfig.ALLOWED_EMAIL_DOMAINS.trim() === '') {
-  console.warn(
-    '\n[SECURITY WARNING] ALLOWED_EMAIL_DOMAINS is unset or empty. Student OTP requests will fail closed until the real campus domain is configured.\n'
-  );
 }
 
 export const env = envConfig;

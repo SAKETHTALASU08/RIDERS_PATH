@@ -1,16 +1,12 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Mail, ArrowRight, ShieldCheck, RefreshCw, KeyRound, UserCheck, HelpCircle, CheckCircle2 } from 'lucide-react';
+import { Mail, ArrowRight, ShieldCheck, RefreshCw, KeyRound, UserCheck } from 'lucide-react';
 import { Modal } from '../ui/Modal';
 import { Button } from '../ui/Button';
 import { Input } from '../ui/Input';
 import { Select } from '../ui/Select';
 import { useAuth } from '../../context/AuthContext';
 import { apiClient } from '../../api/client';
-import { PLATFORM_CONFIG } from '@riders-path/shared';
-import {
-  createManualVerificationRequestSchema,
-  createProfileCompletionSchema,
-} from '@riders-path/shared';
+import { createProfileCompletionSchema } from '@riders-path/shared';
 import { DEFAULT_ENROLLMENT_EXAMPLE, DEFAULT_ENROLLMENT_REGEX } from '@riders-path/shared';
 
 function apiErrorMessage(error: any, fallback: string) {
@@ -21,10 +17,10 @@ function apiErrorMessage(error: any, fallback: string) {
 }
 
 export const AuthModal: React.FC = () => {
-  const { user, isAuthModalOpen, closeAuthModal, requestOtp, verifyOtp, completeProfile, submitManualVerification } = useAuth();
+  const { user, isAuthModalOpen, closeAuthModal, requestOtp, verifyOtp, completeProfile } = useAuth();
 
-  // Steps: 'email' | 'otp' | 'profile' | 'manual'
-  const [step, setStep] = useState<'email' | 'otp' | 'profile' | 'manual'>('email');
+  // Steps: 'email' | 'otp' | 'profile'
+  const [step, setStep] = useState<'email' | 'otp' | 'profile'>('email');
   const [email, setEmail] = useState('');
   const [otpDigits, setOtpDigits] = useState(['', '', '', '', '', '']);
   const [isLoading, setIsLoading] = useState(false);
@@ -33,8 +29,6 @@ export const AuthModal: React.FC = () => {
   const [canResend, setCanResend] = useState(false);
   const [resendUntil, setResendUntil] = useState<number | null>(null);
   const [otpLocked, setOtpLocked] = useState(false);
-  const [allowedDomains, setAllowedDomains] = useState<string[]>([]);
-  const [configError, setConfigError] = useState('');
   const [enrollmentRegex, setEnrollmentRegex] = useState(DEFAULT_ENROLLMENT_REGEX);
   const [enrollmentExample, setEnrollmentExample] = useState(DEFAULT_ENROLLMENT_EXAMPLE);
 
@@ -48,36 +42,18 @@ export const AuthModal: React.FC = () => {
   });
   const [profileErrors, setProfileErrors] = useState<Record<string, string>>({});
 
-  // Manual fallback verification fields
-  const [manualData, setManualData] = useState({
-    name: '',
-    enrollmentNumber: '',
-    alternateEmail: '',
-    note: '',
-  });
-  const [manualSubmitted, setManualSubmitted] = useState(false);
-
   const digitInputRefs = useRef<(HTMLInputElement | null)[]>([]);
   const modalWasOpen = useRef(false);
 
-  // Fetch allowed email domain from public config
+  // Fetch the server-configured enrollment format.
   useEffect(() => {
     let isMounted = true;
     apiClient.getConfig().then((cfg: any) => {
       if (isMounted && cfg) {
-        if (cfg.allowedEmailDomains && Array.isArray(cfg.allowedEmailDomains) && cfg.allowedEmailDomains.length > 0) {
-          setAllowedDomains(cfg.allowedEmailDomains);
-        } else if (cfg.allowedEmailDomain) {
-          setAllowedDomains([cfg.allowedEmailDomain]);
-        } else {
-          setAllowedDomains([]);
-        }
         if (typeof cfg.enrollmentFormatRegex === 'string') setEnrollmentRegex(cfg.enrollmentFormatRegex);
         if (typeof cfg.enrollmentFormatExample === 'string') setEnrollmentExample(cfg.enrollmentFormatExample);
       }
-    }).catch(() => {
-      if (isMounted) setConfigError('Allowed campus email domains could not be loaded. The server will check eligibility when you request a code.');
-    });
+    }).catch(() => undefined);
     return () => { isMounted = false; };
   }, []);
 
@@ -91,7 +67,6 @@ export const AuthModal: React.FC = () => {
       setErrorMessage('');
       setOtpLocked(false);
       setProfileErrors({});
-      setManualSubmitted(false);
     }
     modalWasOpen.current = isAuthModalOpen;
   }, [isAuthModalOpen]);
@@ -124,7 +99,7 @@ export const AuthModal: React.FC = () => {
 
     const trimmed = email.toLowerCase().trim();
     if (!trimmed) {
-      setErrorMessage('Please enter your campus email');
+      setErrorMessage('Please enter your email address');
       return;
     }
 
@@ -266,79 +241,50 @@ export const AuthModal: React.FC = () => {
     }
   };
 
-  // 4. Submit manual verification request
-  const handleManualSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setErrorMessage('');
-    const result = createManualVerificationRequestSchema(enrollmentRegex, enrollmentExample).safeParse(manualData);
-    if (!result.success) {
-      setErrorMessage(result.error.issues[0]?.message || 'Please check your details and try again.');
-      return;
-    }
-
-    setIsLoading(true);
-    try {
-      await submitManualVerification(result.data);
-      setManualSubmitted(true);
-    } catch (err: any) {
-      setErrorMessage(apiErrorMessage(err, 'Failed to submit manual verification request'));
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
   return (
     <Modal
       isOpen={isAuthModalOpen}
       onClose={closeAuthModal}
       title={
         step === 'email'
-          ? 'Campus Student Access'
+          ? 'Sign in with email'
           : step === 'otp'
           ? 'Enter 6-Digit Code'
-          : step === 'manual'
-          ? 'Request Manual Verification'
           : 'Complete Student Profile'
       }
       description={
         step === 'email'
-          ? allowedDomains.length > 0
-            ? `Use your college email (${allowedDomains.map((domain) => `@${domain}`).join(', ')}) to receive a one-time code.`
-            : 'Use your college email to request a one-time code.'
+          ? 'Use any email address to receive a one-time verification code.'
           : step === 'otp'
-          ? `If this address is eligible, a code will be sent to ${email}.`
-          : step === 'manual'
-          ? 'For students awaiting official campus email setup'
+          ? `A code will be sent to ${email}.`
           : 'Provide your enrollment details for campus handover clearance'
       }
     >
-      {/* Step 1: Campus Email */}
+      {/* Step 1: Email */}
       {step === 'email' && (
         <form onSubmit={handleEmailSubmit} className="flex flex-col gap-4">
           <div className="p-3.5 rounded-xl bg-amber-500/10 border border-amber-500/20 text-xs text-amber-300 flex items-start gap-2.5">
             <ShieldCheck className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" aria-hidden="true" />
             <span>
-              Use an allowed college email for <strong>{PLATFORM_CONFIG.campusName}</strong>. Email access is confirmed by code; licence documents are reviewed by the team.
+              Use any email address you can access. We will confirm ownership with a one-time code; licence documents are reviewed by the team.
             </span>
           </div>
 
           <Input
-            id="campus-email"
-            label="College Email Address"
+            id="email"
+            label="Email Address"
             type="email"
             required
             autoFocus
             autoComplete="email"
-            placeholder={allowedDomains[0] ? `student@${allowedDomains[0]}` : 'Enter your campus email'}
+            placeholder="you@example.com"
             value={email}
             onChange={(e) => {
               setEmail(e.target.value);
               setErrorMessage('');
             }}
             error={errorMessage}
-            helperText={allowedDomains.length > 0
-              ? `Allowed domains: ${allowedDomains.map((d) => '@' + d).join(', ')}`
-              : configError || 'Allowed campus email domains are provided by the server configuration.'}
+            helperText="We will send a six-digit code to this address."
             leftIcon={<Mail className="w-4 h-4" />}
           />
 
@@ -351,18 +297,6 @@ export const AuthModal: React.FC = () => {
             Send Verification Code
           </Button>
 
-          <div className="text-center pt-2">
-            <button
-              type="button"
-              onClick={() => {
-                setStep('manual');
-                setErrorMessage('');
-              }}
-              className="text-xs text-neutral-400 hover:text-amber-400 cursor-pointer underline underline-offset-4"
-            >
-              Don't have a campus email yet? Request manual verification
-            </button>
-          </div>
         </form>
       )}
 
@@ -519,90 +453,6 @@ export const AuthModal: React.FC = () => {
         </form>
       )}
 
-      {/* Step 4: Fallback Manual Verification Request */}
-      {step === 'manual' && (
-        <div>
-          {manualSubmitted ? (
-            <div className="flex flex-col items-center text-center gap-3 py-6">
-              <CheckCircle2 className="w-12 h-12 text-emerald-400" />
-              <h3 className="font-semibold text-neutral-100">Verification Request Received</h3>
-              <p className="text-sm text-neutral-400 max-w-sm">
-                Your request was received. The campus team may contact you using the email address you provided.
-              </p>
-              <Button type="button" onClick={closeAuthModal} className="mt-4">
-                Done
-              </Button>
-            </div>
-          ) : (
-            <form onSubmit={handleManualSubmit} className="flex flex-col gap-3.5">
-              <div className="p-3 rounded-xl bg-blue-500/10 border border-blue-500/20 text-xs text-blue-300 flex items-start gap-2">
-                <HelpCircle className="w-4 h-4 text-blue-400 shrink-0 mt-0.5" />
-                <span>Submit your details for the campus team to review if you cannot use an allowed college email.</span>
-              </div>
-
-              {errorMessage && (
-                <p role="alert" aria-live="polite" className="text-xs font-medium text-rose-400">
-                  {errorMessage}
-                </p>
-              )}
-
-              <Input
-                id="manual-name"
-                label="Full Name"
-                required
-                placeholder="Student Name"
-                value={manualData.name}
-                onChange={(e) => setManualData({ ...manualData, name: e.target.value })}
-              />
-
-              <Input
-                id="manual-enrollment"
-                label="Enrollment / Roll Number"
-                required
-                placeholder={enrollmentExample}
-                value={manualData.enrollmentNumber}
-                onChange={(e) => setManualData({ ...manualData, enrollmentNumber: e.target.value.toUpperCase() })}
-              />
-
-              <Input
-                id="manual-email"
-                label="Personal / Alternate Contact Email"
-                type="email"
-                required
-                placeholder="personal@gmail.com"
-                value={manualData.alternateEmail}
-                onChange={(e) => setManualData({ ...manualData, alternateEmail: e.target.value })}
-              />
-
-              <Input
-                id="manual-note"
-                label="Additional Details (Optional)"
-                placeholder="Department, batch, or reason"
-                value={manualData.note}
-                onChange={(e) => setManualData({ ...manualData, note: e.target.value })}
-              />
-
-              <div className="flex items-center gap-2 mt-2">
-                <Button
-                  type="button"
-                  variant="ghost"
-                  onClick={() => setStep('email')}
-                  className="w-1/3"
-                >
-                  Back
-                </Button>
-                <Button
-                  type="submit"
-                  isLoading={isLoading}
-                  className="w-2/3"
-                >
-                  Submit Request
-                </Button>
-              </div>
-            </form>
-          )}
-        </div>
-      )}
     </Modal>
   );
 };

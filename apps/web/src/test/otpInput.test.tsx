@@ -26,7 +26,7 @@ describe('OTP Input & Authentication Flow', () => {
     );
 
     await user.click(screen.getByText('Open Auth'));
-    await user.type(screen.getByLabelText(/college email address/i), `new.student+${Date.now()}@student.example.edu`);
+    await user.type(screen.getByLabelText(/email address/i), `new.student+${Date.now()}@student.example.edu`);
     await user.click(screen.getByRole('button', { name: /send verification code/i }));
     await screen.findByLabelText('Digit 1 of 6');
     screen.getByLabelText('Digit 1 of 6').focus();
@@ -35,7 +35,7 @@ describe('OTP Input & Authentication Flow', () => {
     expect(await screen.findByText(/complete student profile/i)).toBeInTheDocument();
   });
 
-  it('keeps domain eligibility server-side and shows a generic next step', async () => {
+  it('accepts a personal email and shows the verification-code step', async () => {
     const user = userEvent.setup();
     render(
       <ToastProvider>
@@ -49,10 +49,9 @@ describe('OTP Input & Authentication Flow', () => {
     // Open modal
     await user.click(screen.getByText('Open Auth'));
 
-    const emailInput = screen.getByLabelText(/college email address/i);
+    const emailInput = screen.getByLabelText(/email address/i);
     const submitBtn = screen.getByRole('button', { name: /send verification code/i });
 
-    // The browser does not reveal whether the address is on the server allowlist.
     await user.type(emailInput, 'student@gmail.com');
     await user.click(submitBtn);
 

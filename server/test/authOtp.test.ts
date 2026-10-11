@@ -10,11 +10,6 @@ import { setMailer, MemoryTestMailer, NodemailerMailer, DevelopmentConsoleMailer
 describe('Passwordless Email-OTP Authentication & Security Tests', () => {
   let testMailer: MemoryTestMailer;
 
-  beforeAll(() => {
-    // Configure allowed email domain for tests
-    env.ALLOWED_EMAIL_DOMAINS = 'student.example.edu,alternate.example.org';
-  });
-
   beforeEach(() => {
     // Reset test artifacts
     sqlite.prepare('DELETE FROM otp_codes').run();
@@ -36,24 +31,23 @@ describe('Passwordless Email-OTP Authentication & Security Tests', () => {
   // 1. OTP REQUEST TESTS
   // ----------------------------------------------------
   describe('OTP Request (/api/auth/otp/request)', () => {
-    it('returns the same generic success shape for disallowed and unknown email addresses', async () => {
-      const disallowed = await request(app)
+    it('returns the same generic success shape for personal and campus email addresses', async () => {
+      const personal = await request(app)
         .post('/api/auth/otp/request')
         .send({ email: 'attacker@gmail.com' });
-      const unknownAllowed = await request(app)
+      const campus = await request(app)
         .post('/api/auth/otp/request')
         .send({ email: 'new.user@student.example.edu' });
 
-      expect(disallowed.status).toBe(200);
-      expect(unknownAllowed.status).toBe(200);
-      expect(disallowed.body).toEqual(unknownAllowed.body);
-      expect(disallowed.body.success).toBe(true);
-      expect(disallowed.body.message).toMatch(/verification code has been dispatched/i);
+      expect(personal.status).toBe(200);
+      expect(campus.status).toBe(200);
+      expect(personal.body).toEqual(campus.body);
+      expect(personal.body.success).toBe(true);
+      expect(personal.body.message).toMatch(/verification code has been dispatched/i);
 
-      // Verify NO email was dispatched and NO code stored
-      expect(testMailer.sentEmails.length).toBe(1);
+      expect(testMailer.sentEmails.length).toBe(2);
       const inDb = sqlite.prepare('SELECT * FROM otp_codes WHERE email = ?').get('attacker@gmail.com');
-      expect(inDb).toBeUndefined();
+      expect(inDb).toBeDefined();
     });
 
     it('does not distinguish an existing account from a new address', async () => {
@@ -70,7 +64,7 @@ describe('Passwordless Email-OTP Authentication & Security Tests', () => {
       expect(known.body).toEqual(unknown.body);
     });
 
-    it('dispatches a 6-digit numeric code for valid campus email domain', async () => {
+    it('dispatches a 6-digit numeric code for any valid email address', async () => {
       const targetEmail = 'student.fresh@student.example.edu';
       const res = await request(app)
         .post('/api/auth/otp/request')
@@ -92,7 +86,7 @@ describe('Passwordless Email-OTP Authentication & Security Tests', () => {
       expect(sendLog?.email).not.toBe(targetEmail);
     });
 
-    it('fails closed with a generic error when no email domains are configured', async () => {
+    it('still dispatches an OTP when no email domains are configured', async () => {
       const configuredDomains = env.ALLOWED_EMAIL_DOMAINS;
       env.ALLOWED_EMAIL_DOMAINS = '';
       const res = await request(app)
@@ -100,12 +94,9 @@ describe('Passwordless Email-OTP Authentication & Security Tests', () => {
         .send({ email: 'student@student.example.edu' });
       env.ALLOWED_EMAIL_DOMAINS = configuredDomains;
 
-      expect(res.status).toBe(503);
-      expect(res.body).toEqual({
-        error: 'Unable to process the verification request at this time. Please try again later.',
-        code: 'AUTH_UNAVAILABLE',
-      });
-      expect(testMailer.sentEmails).toHaveLength(0);
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+      expect(testMailer.sentEmails).toHaveLength(1);
     });
 
     it('stores only HMAC-SHA256 hash in database and never plaintext code', async () => {
@@ -189,7 +180,7 @@ describe('Passwordless Email-OTP Authentication & Security Tests', () => {
       expect(res.status).toBe(200);
       expect(res.body).toEqual({
         success: true,
-        message: 'If this is a valid campus email address, a verification code has been dispatched.',
+        message: 'If this is a valid email address, a verification code has been dispatched.',
         cooldownSeconds: env.OTP_RESEND_COOLDOWN_SECONDS,
       });
       expect(sqlite.prepare('SELECT * FROM otp_codes WHERE email = ?').get('mail.failure@student.example.edu')).toBeUndefined();

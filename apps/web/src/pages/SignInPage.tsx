@@ -39,7 +39,7 @@ export const SignInPage: React.FC = () => {
       <LockKeyhole className="w-10 h-10 text-amber-400 mx-auto mb-4" aria-hidden="true" />
       <h1 className="text-2xl font-bold text-neutral-100">Sign in to continue</h1>
       <p className="mt-2 text-sm text-neutral-400">
-        Verify your campus email to continue. Your current booking step will be waiting when you return.
+        Verify your email to continue. Your current booking step will be waiting when you return.
       </p>
       <Button className="mt-6" onClick={openAuthModal}>Continue to sign in</Button>
     </section>

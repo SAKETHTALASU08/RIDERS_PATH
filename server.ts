@@ -204,7 +204,7 @@ function computeOtpHmac(email: string, code: string): string {
     .digest('hex');
 }
 
-const GENERIC_OTP_REQUEST_MESSAGE = 'If this is a valid campus email address, a verification code has been dispatched.';
+const GENERIC_OTP_REQUEST_MESSAGE = 'If this is a valid email address, a verification code has been dispatched.';
 const OTP_REQUEST_MIN_RESPONSE_MS = 500;
 
 async function keepOtpRequestTimingSimilar(startedAt: number) {
@@ -252,28 +252,6 @@ app.post('/api/auth/otp/request', async (req: Request, res: Response) => {
     ipAddress: req.ip,
     userAgent: req.headers['user-agent'],
   });
-  const allowedDomains = getAllowedEmailDomains();
-
-  // Fail closed if allowed domains are not configured
-  if (allowedDomains.length === 0) {
-    await keepOtpRequestTimingSimilar(startedAt);
-    return res.status(503).json({
-      error: 'Unable to process the verification request at this time. Please try again later.',
-      code: 'AUTH_UNAVAILABLE',
-    });
-  }
-
-  // Non-campus domains get the same public response as eligible requests.
-  const isAllowedDomain = allowedDomains.some((d) => normalizedEmail.endsWith('@' + d));
-  if (!isAllowedDomain) {
-    await keepOtpRequestTimingSimilar(startedAt);
-    return res.json({
-      success: true,
-      message: GENERIC_OTP_REQUEST_MESSAGE,
-      cooldownSeconds: env.OTP_RESEND_COOLDOWN_SECONDS,
-    });
-  }
-
   const clientIp = req.ip || '127.0.0.1';
   const reservation = db.reserveOtpSend(normalizedEmail, clientIp, {
     cooldownSeconds: env.OTP_RESEND_COOLDOWN_SECONDS,

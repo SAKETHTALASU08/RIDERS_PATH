@@ -32,7 +32,7 @@ export const LandingPage: React.FC = () => {
     {
       step: '02',
       title: 'Email and document review',
-      desc: 'Confirm an allowed college email, complete your profile, and submit the requested documents for human review.',
+      desc: 'Confirm your email, complete your profile, and submit the requested documents for human review.',
       icon: <ShieldCheck className="w-5 h-5 text-amber-400" />,
     },
     {
@@ -65,7 +65,7 @@ export const LandingPage: React.FC = () => {
   const faqs = [
     {
       q: 'Who can rent bikes on Riders Path?',
-      a: `Any active student of ${PLATFORM_CONFIG.campusName} with an allowed college email, a complete profile, and a valid two-wheeler driving licence.`,
+      a: `Any active student of ${PLATFORM_CONFIG.campusName} with a verified email address, a complete profile, and a valid two-wheeler driving licence.`,
     },
     {
       q: 'What are the security deposit options?',
