@@ -22,11 +22,11 @@ export const Navbar: React.FC = () => {
 
   return (
     <header className="sticky top-0 z-40 w-full bg-neutral-950/85 backdrop-blur-md border-b border-neutral-800/80">
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between">
+      <div className="max-w-7xl mx-auto px-5 sm:px-8 h-[68px] flex items-center justify-between">
         {/* Brand Logo */}
         <Link
           to="/"
-          className="flex items-center gap-2.5 text-neutral-100 hover:text-amber-400 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 rounded-lg p-1"
+          className="flex items-center gap-2.5 text-neutral-100 hover:text-amber-400 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 rounded-lg -ml-1 p-1"
         >
           <div className="w-9 h-9 rounded-xl bg-amber-500 flex items-center justify-center text-slate-950 font-black shadow-md shadow-amber-500/20">
             <Bike className="w-5 h-5 stroke-[2.5]" aria-hidden="true" />
@@ -42,15 +42,15 @@ export const Navbar: React.FC = () => {
         </Link>
 
         {/* Desktop Nav Links */}
-        <nav aria-label="Main Navigation" className="hidden md:flex items-center gap-1.5">
+        <nav aria-label="Main Navigation" className="hidden md:flex items-center gap-1">
           {navLinks.map((link) => (
             <Link
               key={link.path}
               to={link.path}
-              className={`px-3.5 py-2 rounded-xl text-xs font-semibold transition-all ${
+              className={`relative px-3 py-2 text-xs font-medium transition-colors after:absolute after:bottom-1 after:left-3 after:right-3 after:h-px after:origin-left after:transition-transform ${
                 isActive(link.path)
-                  ? 'bg-neutral-800 text-amber-400'
-                  : 'text-neutral-300 hover:text-neutral-100 hover:bg-neutral-900'
+                  ? 'text-amber-400 after:scale-x-100 after:bg-amber-400'
+                  : 'text-neutral-300 after:scale-x-0 after:bg-neutral-300 hover:text-neutral-100 hover:after:scale-x-100'
               }`}
             >
               {link.label}
@@ -59,7 +59,7 @@ export const Navbar: React.FC = () => {
         </nav>
 
         {/* Desktop User Actions */}
-        <div className="hidden md:flex items-center gap-3">
+        <div className="hidden md:flex items-center gap-4">
           <ThemeToggle />
           {user ? (
             <div className="flex items-center gap-2.5">
