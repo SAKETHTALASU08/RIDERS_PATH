@@ -132,11 +132,17 @@ export class MemoryTestMailer implements Mailer {
   }
 }
 
+// A configured SMTP account is useful during local development too. Without
+// it, development keeps OTPs local by writing them to the API terminal.
+const hasSmtpConfiguration = Boolean(
+  env.SMTP_HOST && env.SMTP_USER && env.SMTP_PASS && env.MAIL_FROM
+);
+
 // Default system mailer instance (swappable at test runtime)
 let activeMailer: Mailer =
   env.NODE_ENV === 'test'
     ? new MemoryTestMailer()
-    : env.NODE_ENV === 'production'
+    : env.NODE_ENV === 'production' || hasSmtpConfiguration
       ? new NodemailerMailer()
       : new DevelopmentConsoleMailer();
 

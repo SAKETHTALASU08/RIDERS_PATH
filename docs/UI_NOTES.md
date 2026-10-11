@@ -22,7 +22,7 @@
 ## Local development
 
 1. Copy `.env.example` to `.env` and generate unique values for `OTP_HMAC_SECRET` (`openssl rand -hex 32`) and `DOCUMENT_ENCRYPTION_KEY` (`openssl rand -base64 32`). Keep `.env` out of source control.
-2. Development OTPs are written to the API terminal by the development mail adapter. For real delivery, configure `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, and `MAIL_FROM`.
+2. Development OTPs are written to the API terminal when SMTP is blank. To send real email without a custom domain, configure a Gmail account with a Google App Password: `SMTP_HOST=smtp.gmail.com`, `SMTP_PORT=465`, `SMTP_USER` and `MAIL_FROM` set to that Gmail address, and `SMTP_PASS` set to the app password. Any complete SMTP configuration is used in development and production.
 3. Run `npm run dev` for the API, `npm run dev:web` for students at `http://localhost:5173`, and `npm run dev:admin` for admins at `http://localhost:5174`.
 4. If the UI and API contracts were both edited while `npm run dev` was already running, restart the API. The frontend dev server hot reloads; the API process does not reload automatically.
 
