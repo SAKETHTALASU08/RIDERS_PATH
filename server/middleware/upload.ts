@@ -14,10 +14,14 @@ export function detectImageMime(bytes: Buffer): 'image/jpeg' | 'image/png' | 'im
   return null;
 }
 
+export function detectDocumentMime(bytes: Buffer): 'image/jpeg' | 'image/png' | 'image/webp' | 'application/pdf' | null {
+  return detectImageMime(bytes) || (bytes.subarray(0, 5).toString('ascii') === '%PDF-' ? 'application/pdf' : null);
+}
+
 export function verifyMagicBytes(req: Request, res: Response, next: NextFunction) {
   const file = req.file || (req.files as Express.Multer.File[] | undefined)?.[0];
-  if (!file || !detectImageMime(file.buffer)) {
-    return res.status(400).json({ error: 'Choose a valid JPEG, PNG, or WebP image.', code: 'INVALID_FILE_TYPE' });
+  if (!file || !detectDocumentMime(file.buffer)) {
+    return res.status(400).json({ error: 'Choose a valid JPEG, PNG, WebP, or PDF document.', code: 'INVALID_FILE_TYPE' });
   }
   next();
 }

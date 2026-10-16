@@ -16,6 +16,7 @@ import { ErrorState } from '../components/ui/ErrorState';
 import { validateDocumentFile, DocumentType } from '../features/documents/validateDocumentFile';
 
 type UploadedDocument = { id: string; name: string; previewUrl: string; byteSize: number };
+const BOOKING_DESK_WHATSAPP = '919573213150';
 const documentLabels: Record<DocumentType, string> = {
   driving_license: 'Two-wheeler driving licence',
   student_id: 'College student ID',
@@ -52,6 +53,17 @@ export const BookingFlowPage: React.FC = () => {
   const [booking, setBooking] = useState<BookingResponse | null>(null);
   const [idempotencyKey] = useState(() => `booking_${crypto.randomUUID()}`);
   const previewUrls = useRef<string[]>([]);
+
+  const bookingWhatsAppUrl = booking && user
+    ? `https://wa.me/${BOOKING_DESK_WHATSAPP}?text=${encodeURIComponent([
+      'New Riders Path bike request',
+      `Student: ${user.name}`,
+      `Phone: ${user.phone}`,
+      `Bike: ${booking.bike.brand} ${booking.bike.model}`,
+      `Pickup: ${booking.pickupHubName}`,
+      `Reference: ${booking.id}`,
+    ].join('\n'))}`
+    : '';
 
   useEffect(() => {
     let cancelled = false;
@@ -222,8 +234,8 @@ export const BookingFlowPage: React.FC = () => {
         return <section key={type} className="rounded-xl border border-neutral-700 p-4 space-y-3" aria-labelledby={`label-${type}`}>
           <div className="flex items-center justify-between gap-3"><h3 id={`label-${type}`} className="font-semibold">{documentLabels[type]} <span className="text-rose-300">*</span></h3>{doc?.id && <Badge variant="success">Uploaded · pending review</Badge>}</div>
           {doc && <div className="flex items-center gap-3"><img src={doc.previewUrl} alt={`${documentLabels[type]} preview`} width="96" height="72" loading="lazy" className="h-18 w-24 rounded-md object-cover"/><span className="text-sm text-neutral-300 truncate">{doc.name}</span>{doc.id ? <Button variant="ghost" aria-label={`Remove ${documentLabels[type]}`} onClick={() => void removeDocument(type)}><Trash2 size={16}/></Button> : null}</div>}
-          {!doc?.id && <><label className="inline-flex min-h-11 items-center gap-2 rounded-lg border border-neutral-600 px-4 cursor-pointer"><Upload size={16}/>{file ? 'Choose a different image' : `Choose ${documentLabels[type].toLowerCase()}`}<input type="file" accept="image/jpeg,image/png,image/webp" className="sr-only" onChange={(event) => selectFile(type, event.target.files?.[0])}/></label>{file && <Button onClick={() => void upload(type)} disabled={uploadingType !== null} isLoading={uploadingType === type}>Upload file</Button>}</>}
-          <p className="text-xs text-neutral-400">JPEG, PNG, or WebP · maximum 5 MB. Image metadata is removed during processing.</p>
+          {!doc?.id && <><label className="inline-flex min-h-11 items-center gap-2 rounded-lg border border-neutral-600 px-4 cursor-pointer"><Upload size={16}/>{file ? 'Choose a different file' : `Choose ${documentLabels[type].toLowerCase()}`}<input type="file" accept="image/jpeg,image/png,image/webp,application/pdf,.pdf" className="sr-only" onChange={(event) => selectFile(type, event.target.files?.[0])}/></label>{file && <Button onClick={() => void upload(type)} disabled={uploadingType !== null} isLoading={uploadingType === type}>Upload file</Button>}</>}
+          <p className="text-xs text-neutral-400">JPEG, PNG, WebP, or PDF · maximum 5 MB. Image metadata is removed during processing.</p>
           {fileErrors[type] && <p role="alert" aria-live="polite" className="text-sm text-rose-300">{fileErrors[type]}</p>}
         </section>;
       })}</div>}
@@ -237,6 +249,15 @@ export const BookingFlowPage: React.FC = () => {
       <div className="flex gap-3"><Button variant="outline" onClick={() => setStep(2)}>Back</Button><Button onClick={() => void submitBooking()} disabled={!termsChecked || loadingAction} isLoading={loadingAction}>Send booking request <CheckCircle2 size={16}/></Button></div>
     </Card>}
 
-    {step === 4 && booking && <Card className="flex flex-col items-center gap-4 text-center"><QrCode size={36} className="text-amber-300"/><Badge variant={booking.status === 'CONFIRMED' ? 'success' : 'warning'}>{booking.status === 'CONFIRMED' ? 'CONFIRMED' : 'REQUEST RECEIVED · REVIEW PENDING'}</Badge><h2 className="text-2xl font-bold">Booking reference</h2><p className="text-neutral-300">Your documents are under team review. You will see the next step in My bookings. Payment is at handover.</p><div className="w-full max-w-md rounded-xl bg-neutral-950 p-4 text-left space-y-2"><p><span className="text-neutral-400">Reference: </span><strong>{booking.id}</strong></p><p><span className="text-neutral-400">Bike: </span>{booking.bike.brand} {booking.bike.model}</p><p><span className="text-neutral-400">Pickup hub: </span>{booking.pickupHubName}</p><p><span className="text-neutral-400">Pay at handover: </span>₹{booking.pricing.totalPayableAtHandoverInr}</p></div><div className="flex gap-3"><Link to="/my-bookings" className="min-h-11 inline-flex items-center rounded-lg bg-amber-400 px-4 font-semibold text-black">My bookings</Link><Link to="/browse" className="min-h-11 inline-flex items-center rounded-lg border border-neutral-600 px-4">Browse bikes</Link></div></Card>}
+    {step === 4 && booking && <Card className="flex flex-col items-center gap-4 text-center">
+      <QrCode size={36} className="text-amber-300"/>
+      <Badge variant={booking.status === 'CONFIRMED' ? 'success' : 'warning'}>{booking.status === 'CONFIRMED' ? 'CONFIRMED' : 'REQUEST RECEIVED · REVIEW PENDING'}</Badge>
+      <h2 className="text-2xl font-bold">Booking reference</h2>
+      <p className="text-neutral-300">Your documents are under team review. You will see the next step in My bookings. Payment is at handover.</p>
+      <div className="w-full max-w-md rounded-xl bg-neutral-950 p-4 text-left space-y-2"><p><span className="text-neutral-400">Reference: </span><strong>{booking.id}</strong></p><p><span className="text-neutral-400">Bike: </span>{booking.bike.brand} {booking.bike.model}</p><p><span className="text-neutral-400">Pickup hub: </span>{booking.pickupHubName}</p><p><span className="text-neutral-400">Pay at handover: </span>₹{booking.pricing.totalPayableAtHandoverInr}</p></div>
+      <a href={bookingWhatsAppUrl} target="_blank" rel="noreferrer" className="min-h-11 inline-flex items-center rounded-lg border border-emerald-500/60 bg-emerald-500/10 px-4 font-semibold text-emerald-200 hover:bg-emerald-500/20">Send request details to booking desk on WhatsApp</a>
+      <p className="text-xs text-neutral-400">WhatsApp opens with your booking details ready to send to 9573213150.</p>
+      <div className="flex gap-3"><Link to="/my-bookings" className="min-h-11 inline-flex items-center rounded-lg bg-amber-400 px-4 font-semibold text-black">My bookings</Link><Link to="/browse" className="min-h-11 inline-flex items-center rounded-lg border border-neutral-600 px-4">Browse bikes</Link></div>
+    </Card>}
   </div>;
 };

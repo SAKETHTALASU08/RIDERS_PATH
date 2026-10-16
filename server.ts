@@ -28,7 +28,7 @@ import {
   ownerLimiter,
   geminiLimiter,
 } from './server/middleware/rateLimit';
-import { documentUpload, detectImageMime } from './server/middleware/upload';
+import { documentUpload, detectDocumentMime, detectImageMime } from './server/middleware/upload';
 import { createShortLivedDocumentUrl, deletePrivateDocument, readPrivateDocument, storePrivateDocument } from './server/services/privateDocumentStorage';
 import { purgeExpiredDocuments } from './server/services/documentRetention';
 import { verifyDocumentWithGemini } from './server/gemini';
@@ -1170,7 +1170,7 @@ app.post(
       const type = req.body?.documentType;
       const consentId = req.body?.consentId;
       if (!file || !['driving_license', 'student_id', 'aadhaar'].includes(type)) {
-        return res.status(400).json({ error: 'Choose a required document and image file.', code: 'DOCUMENT_REQUIRED' });
+        return res.status(400).json({ error: 'Choose a required document file.', code: 'DOCUMENT_REQUIRED' });
       }
       if (type === 'aadhaar' && !env.REQUIRE_AADHAAR_UPLOAD) {
         return res.status(400).json({ error: 'Aadhaar upload is not enabled.', code: 'DOCUMENT_NOT_ENABLED' });
@@ -1178,30 +1178,35 @@ app.post(
       const consent = sqlite.prepare(`SELECT id FROM document_consents WHERE id = ? AND user_id = ? AND version = ?`)
         .get(consentId, req.user!.id, env.DOCUMENT_CONSENT_VERSION);
       if (!consent) return res.status(403).json({ error: 'Current document consent is required before upload.', code: 'CONSENT_REQUIRED' });
-      const inputMime = detectImageMime(file.buffer);
-      if (!inputMime) return res.status(400).json({ error: 'Choose a valid JPEG, PNG, or WebP image.', code: 'INVALID_FILE_TYPE' });
+      const inputMime = detectDocumentMime(file.buffer);
+      if (!inputMime) return res.status(400).json({ error: 'Choose a valid JPEG, PNG, WebP, or PDF document.', code: 'INVALID_FILE_TYPE' });
 
       const imageId = crypto.randomUUID();
-      let normalized: Buffer;
-      try {
-        normalized = await sharp(file.buffer, { limitInputPixels: 40_000_000, failOn: 'error' })
-          .rotate()
-          .resize({ width: 2400, height: 2400, fit: 'inside', withoutEnlargement: true })
-          .jpeg({ quality: 84, mozjpeg: true })
-          .toBuffer();
-      } catch {
-        return res.status(400).json({ error: 'This image could not be safely processed. Choose another image.', code: 'INVALID_IMAGE' });
+      let storedBytes: Buffer;
+      let storedMime: 'image/jpeg' | 'application/pdf';
+      if (inputMime === 'application/pdf') {
+        storedBytes = file.buffer;
+        storedMime = 'application/pdf';
+      } else {
+        try {
+          storedBytes = await sharp(file.buffer, { limitInputPixels: 40_000_000, failOn: 'error' })
+            .rotate()
+            .resize({ width: 2400, height: 2400, fit: 'inside', withoutEnlargement: true })
+            .jpeg({ quality: 84, mozjpeg: true })
+            .toBuffer();
+          storedMime = 'image/jpeg';
+        } catch {
+          return res.status(400).json({ error: 'This image could not be safely processed. Choose another image.', code: 'INVALID_IMAGE' });
+        }
       }
-      if (normalized.length > 5 * 1024 * 1024) {
-        return res.status(400).json({ error: 'Processed image exceeds the 5 MB limit.', code: 'FILE_TOO_LARGE' });
-      }
+      if (storedBytes.length > 5 * 1024 * 1024) return res.status(400).json({ error: 'Document exceeds the 5 MB limit.', code: 'FILE_TOO_LARGE' });
       try {
-        const objectKey = await storePrivateDocument(imageId, normalized, 'image/jpeg');
+        const objectKey = await storePrivateDocument(imageId, storedBytes, storedMime);
         sqlite.prepare(`
           INSERT INTO user_documents (id, user_id, consent_id, document_type, object_key, storage_driver, mime_type, byte_size, uploaded_at)
-          VALUES (?, ?, ?, ?, ?, ?, 'image/jpeg', ?, ?)
-        `).run(imageId, req.user!.id, consentId, type, objectKey, env.DOCUMENT_STORAGE_DRIVER, normalized.length, new Date().toISOString());
-        return res.status(201).json({ id: imageId, documentType: type, reviewStatus: 'pending', byteSize: normalized.length });
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(imageId, req.user!.id, consentId, type, objectKey, env.DOCUMENT_STORAGE_DRIVER, storedMime, storedBytes.length, new Date().toISOString());
+        return res.status(201).json({ id: imageId, documentType: type, reviewStatus: 'pending', byteSize: storedBytes.length });
       } catch (error) {
         next(error);
       }
@@ -1253,12 +1258,12 @@ function maskTail(value: string | null, visible: number) {
 
 app.get('/api/admin/documents/:id/view-url', requireAdmin, async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const document = sqlite.prepare(`SELECT id, object_key FROM user_documents WHERE id = ? AND deleted_at IS NULL`)
-      .get(req.params.id) as { id: string; object_key: string } | undefined;
+    const document = sqlite.prepare(`SELECT id, object_key, mime_type FROM user_documents WHERE id = ? AND deleted_at IS NULL`)
+      .get(req.params.id) as { id: string; object_key: string; mime_type: string } | undefined;
     if (!document) return res.status(404).json({ error: 'Document not found.' });
     const url = createShortLivedDocumentUrl(document.id, req.admin!.id);
     db.logAudit({ actorId: req.admin!.id, actorRole: 'admin', action: 'DOCUMENT_VIEW_URL_ISSUED', targetType: 'user_document', targetId: document.id, ipAddress: req.ip, userAgent: req.headers['user-agent'] });
-    res.json({ url, expiresInSeconds: 60 });
+    res.json({ url, contentType: document.mime_type, expiresInSeconds: 60 });
   } catch (error) { next(error); }
 });
 
@@ -1273,14 +1278,14 @@ app.get('/api/admin/documents/:id/content', async (req: Request, res: Response) 
   const expected = crypto.createHmac('sha256', env.SESSION_SECRET).update(`${req.params.id}:${expires}:${actorId}`).digest();
   const received = Buffer.from(signature, 'hex');
   if (received.length !== expected.length || !crypto.timingSafeEqual(received, expected)) return res.status(403).json({ error: 'Invalid document link.' });
-  const document = sqlite.prepare(`SELECT object_key FROM user_documents WHERE id = ? AND deleted_at IS NULL`)
-    .get(req.params.id) as { object_key: string } | undefined;
+  const document = sqlite.prepare(`SELECT object_key, mime_type FROM user_documents WHERE id = ? AND deleted_at IS NULL`)
+    .get(req.params.id) as { object_key: string; mime_type: string } | undefined;
   if (!document) return res.status(404).end();
   db.logAudit({ actorId, actorRole: 'admin', action: 'DOCUMENT_VIEW_REQUESTED', targetType: 'user_document', targetId: req.params.id, ipAddress: req.ip, userAgent: req.headers['user-agent'] });
   try {
     const result = await readPrivateDocument(document.object_key);
     db.logAudit({ actorId, actorRole: 'admin', action: 'DOCUMENT_VIEWED', targetType: 'user_document', targetId: req.params.id, ipAddress: req.ip, userAgent: req.headers['user-agent'] });
-    res.set({ 'Content-Type': result.contentType, 'Cache-Control': 'no-store, private', 'X-Content-Type-Options': 'nosniff', 'Content-Disposition': 'inline' });
+    res.set({ 'Content-Type': document.mime_type || result.contentType, 'Cache-Control': 'no-store, private', 'X-Content-Type-Options': 'nosniff', 'Content-Disposition': 'inline' });
     res.send(result.bytes);
   } catch { res.status(404).end(); }
 });
@@ -1314,11 +1319,11 @@ app.post('/api/admin/documents/:id/review', requireAdmin, (req: Request, res: Re
 
 app.get('/api/admin/listings', requireAdmin, (req: Request, res: Response) => {
   const statuses = ['APPROVED', 'CHANGES_REQUESTED', 'REJECTED'].includes(String(req.query.status))
-    ? [String(req.query.status)] : ['PENDING_APPROVAL', 'CHANGES_REQUESTED'];
+    ? [String(req.query.status)] : ['PENDING_APPROVAL', 'CHANGES_REQUESTED', 'APPROVED', 'REJECTED'];
   const rows = sqlite.prepare(`
     SELECT b.id, b.owner_id, b.brand, b.model, b.year, b.bike_type, b.fuel_type, b.transmission,
       b.images, b.hourly_rate_inr, b.daily_rate_inr, b.hub_name, b.registration_masked, b.approval_status,
-      b.admin_notes, b.created_at, u.email
+      b.admin_notes, b.created_at, b.availability_status, u.email
     FROM bikes b JOIN users u ON u.id = b.owner_id
     WHERE b.approval_status IN (${statuses.map(() => '?').join(',')})
     ORDER BY b.created_at ASC LIMIT 200
@@ -1339,9 +1344,47 @@ app.get('/api/admin/listings', requireAdmin, (req: Request, res: Response) => {
     hubName: row.hub_name,
     registrationMasked: row.registration_masked,
     status: row.approval_status,
+    availabilityStatus: row.availability_status,
     adminNotes: row.admin_notes,
     submittedAt: row.created_at,
   })));
+});
+
+app.post('/api/admin/listings', requireAdmin, (req: Request, res: Response) => {
+  const schema = z.object({
+    brand: z.string().trim().min(1).max(60), model: z.string().trim().min(1).max(80),
+    year: z.coerce.number().int().min(2010).max(new Date().getFullYear() + 1),
+    registrationNumber: z.string().trim().min(6).max(20),
+    bikeType: z.enum(['scooter', 'commuter', 'sports', 'cruiser', 'electric']),
+    fuelType: z.enum(['petrol', 'electric']), transmission: z.enum(['automatic', 'manual']),
+    hourlyRateInr: z.coerce.number().int().min(20).max(2000), dailyRateInr: z.coerce.number().int().min(100).max(20000),
+    hubId: z.string(), imageUrl: z.string().url().optional(), description: z.string().trim().max(500).optional(),
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message || 'Check the listing details.' });
+  const hub = PLATFORM_CONFIG.hubs.find((item) => item.id === parsed.data.hubId);
+  if (!hub) return res.status(400).json({ error: 'Choose a valid pickup hub.' });
+  const created = db.createBike({
+    ownerId: 'usr_owner_student_01', brand: parsed.data.brand, model: parsed.data.model, year: parsed.data.year,
+    registrationNumber: parsed.data.registrationNumber.toUpperCase().replace(/\s+/g, ''), bikeType: parsed.data.bikeType,
+    fuelType: parsed.data.fuelType, transmission: parsed.data.transmission, hourlyRateInr: parsed.data.hourlyRateInr,
+    dailyRateInr: parsed.data.dailyRateInr, hubId: hub.id, hubName: hub.name, description: parsed.data.description || '',
+    images: parsed.data.imageUrl ? [parsed.data.imageUrl] : [], availabilityStatus: 'UNAVAILABLE', approvalStatus: 'PENDING_APPROVAL',
+    features: [],
+  });
+  db.logAudit({ actorId: req.admin!.id, actorRole: 'admin', action: 'LISTING_CREATED', targetType: 'bike', targetId: created.id, ipAddress: req.ip, userAgent: req.headers['user-agent'] });
+  res.status(201).json(created);
+});
+
+app.patch('/api/admin/listings/:id/availability', requireAdmin, (req: Request, res: Response) => {
+  const availabilityStatus = req.body?.availabilityStatus;
+  if (!['AVAILABLE', 'UNAVAILABLE'].includes(availabilityStatus)) return res.status(400).json({ error: 'Choose AVAILABLE or UNAVAILABLE.' });
+  const bike = sqlite.prepare('SELECT id, approval_status FROM bikes WHERE id = ?').get(req.params.id) as { id: string; approval_status: string } | undefined;
+  if (!bike) return res.status(404).json({ error: 'Listing not found.' });
+  if (availabilityStatus === 'AVAILABLE' && bike.approval_status !== 'APPROVED') return res.status(400).json({ error: 'Approve the listing before making it available.' });
+  sqlite.prepare('UPDATE bikes SET availability_status = ?, updated_at = ? WHERE id = ?').run(availabilityStatus, new Date().toISOString(), bike.id);
+  db.logAudit({ actorId: req.admin!.id, actorRole: 'admin', action: `LISTING_${availabilityStatus}`, targetType: 'bike', targetId: bike.id, ipAddress: req.ip, userAgent: req.headers['user-agent'] });
+  res.json({ success: true, availabilityStatus });
 });
 
 app.post('/api/admin/listings/:id/review', requireAdmin, (req: Request, res: Response) => {
