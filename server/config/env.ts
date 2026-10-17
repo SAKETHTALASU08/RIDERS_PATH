@@ -65,11 +65,14 @@ const EnvSchema = z.object({
         ctx.addIssue({ code: 'custom', path: [key], message: `${key} is required in production` });
       }
     }
-    if (config.DOCUMENT_STORAGE_DRIVER !== 's3' || !config.DOCUMENT_S3_BUCKET) {
-      ctx.addIssue({ code: 'custom', path: ['DOCUMENT_STORAGE_DRIVER'], message: 'Production document storage requires DOCUMENT_STORAGE_DRIVER=s3 and DOCUMENT_S3_BUCKET' });
-    }
-    if (config.DOCUMENT_STORAGE_DRIVER === 's3' && !config.DOCUMENT_S3_KMS_KEY_ID) {
-      ctx.addIssue({ code: 'custom', path: ['DOCUMENT_S3_KMS_KEY_ID'], message: 'Production S3 document storage requires a KMS key id' });
+    // If S3 driver is explicitly chosen in production, require bucket and KMS key
+    if (config.DOCUMENT_STORAGE_DRIVER === 's3') {
+      if (!config.DOCUMENT_S3_BUCKET) {
+        ctx.addIssue({ code: 'custom', path: ['DOCUMENT_S3_BUCKET'], message: 'DOCUMENT_S3_BUCKET is required when using S3 storage' });
+      }
+      if (!config.DOCUMENT_S3_KMS_KEY_ID) {
+        ctx.addIssue({ code: 'custom', path: ['DOCUMENT_S3_KMS_KEY_ID'], message: 'Production S3 document storage requires a KMS key id' });
+      }
     }
   }
   if (config.DOCUMENT_STORAGE_DRIVER === 'local' && config.NODE_ENV !== 'test') {
