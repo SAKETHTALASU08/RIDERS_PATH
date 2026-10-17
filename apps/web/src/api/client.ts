@@ -246,9 +246,22 @@ export const apiClient = {
   },
 
   // Bookings
-  async createDocumentConsent(version: string): Promise<{ id: string; version: string }> {
+  async createDocumentConsent(
+    version: string,
+    studentInfo?: { name?: string; email?: string; phone?: string; enrollment?: string },
+  ): Promise<{ id: string; version: string }> {
     if (USE_MOCK) return { id: crypto.randomUUID(), version };
-    return request('/documents/consent', { method: 'POST', body: JSON.stringify({ accepted: true, version }) });
+    return request('/documents/consent', {
+      method: 'POST',
+      body: JSON.stringify({
+        accepted: true,
+        version,
+        name: studentInfo?.name,
+        email: studentInfo?.email,
+        phone: studentInfo?.phone,
+        enrollment: studentInfo?.enrollment,
+      }),
+    });
   },
 
   async uploadDocument(file: File, documentType: 'driving_license' | 'student_id' | 'aadhaar', consentId: string): Promise<{ id: string; documentType: string; reviewStatus: string; byteSize: number }> {

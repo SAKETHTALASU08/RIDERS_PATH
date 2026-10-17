@@ -840,13 +840,10 @@ app.post('/api/pricing/calculate', (req: Request, res: Response) => {
 });
 
 // ----------------------------------------------------
-// BOOKINGS (STUDENT & ADMIN PROTECTED)
+// BOOKINGS (STUDENT & GUEST SUBMISSION ALLOWED)
 // ----------------------------------------------------
 app.post(
   '/api/bookings',
-  requireUser,
-  requireEmailVerified,
-  requireProfileComplete,
   bookingLimiter,
   (req: Request, res: Response) => {
     const parseResult = BookingCreateSchema.safeParse(req.body);
@@ -858,19 +855,73 @@ app.post(
     }
 
     const data = parseResult.data;
-    const user = req.user!;
 
-  // 1. Cap concurrent pending bookings per user (max 3)
-  const userBookings = db.getBookings(user.id);
-  const activeCount = userBookings.filter(
-    (b) => b.status === 'PENDING_VERIFICATION' || b.status === 'CONFIRMED' || b.status === 'ACTIVE'
-  ).length;
+    let renterName = (data.renterName || req.user?.fullName || '').trim();
+    let renterEmail = (data.renterEmail || req.user?.email || '').trim().toLowerCase();
+    let renterPhone = (data.renterPhone || req.user?.phone || '').trim();
+    let renterEnrollment = (data.renterEnrollment || req.user?.icfaiEnrollment || '').trim();
 
-  if (activeCount >= 3) {
-    return res.status(400).json({
-      error: 'Booking Limit: You have 3 active reservations. Please complete or cancel one before booking again.',
-    });
-  }
+    let user = req.user;
+    if (!user) {
+      if (!renterEmail) {
+        return res.status(400).json({ error: 'Renter email address is required for booking.' });
+      }
+      if (!renterName) {
+        return res.status(400).json({ error: 'Renter full name is required for booking.' });
+      }
+      if (!renterPhone) {
+        return res.status(400).json({ error: 'Renter phone number is required.' });
+      }
+
+      let existing = db.getUserByEmail(renterEmail);
+      if (!existing) {
+        existing = db.createUser({
+          email: renterEmail,
+          fullName: renterName,
+          phone: renterPhone,
+          icfaiEnrollment: renterEnrollment || null,
+          emailVerified: 1,
+          profileComplete: 1,
+        });
+      } else {
+        db.updateUser(existing.id, {
+          fullName: renterName || existing.full_name,
+          phone: renterPhone || existing.phone,
+          icfaiEnrollment: renterEnrollment || existing.icfai_enrollment,
+          profileComplete: 1,
+        });
+        existing = db.getUserById(existing.id);
+      }
+      user = toUserProfile(existing);
+
+      // Re-assign consent & documents to this student user
+      sqlite.prepare('UPDATE document_consents SET user_id = ? WHERE id = ?').run(user.id, data.documentConsentId);
+      for (const docId of data.documentIds) {
+        sqlite.prepare('UPDATE user_documents SET user_id = ? WHERE id = ?').run(user.id, docId);
+      }
+
+      // Establish authenticated session so student can check My Bookings
+      const rawToken = crypto.randomBytes(32).toString('hex');
+      db.createSession(rawToken, user.id, 'student', 24 * 7, req.ip, req.headers['user-agent']);
+      res.cookie(STUDENT_SESSION_COOKIE, rawToken, STUDENT_SESSION_COOKIE_OPTIONS);
+    }
+
+    renterName = user.name || renterName;
+    renterEmail = user.email || renterEmail;
+    renterPhone = user.phone || renterPhone;
+    renterEnrollment = user.enrollmentNumber || renterEnrollment;
+
+    // 1. Cap concurrent pending bookings per user (max 3)
+    const userBookings = db.getBookings(user.id);
+    const activeCount = userBookings.filter(
+      (b) => b.status === 'PENDING_VERIFICATION' || b.status === 'CONFIRMED' || b.status === 'ACTIVE'
+    ).length;
+
+    if (activeCount >= 3) {
+      return res.status(400).json({
+        error: 'Booking Limit: You have 3 active reservations. Please complete or cancel one before booking again.',
+      });
+    }
 
   // 2. Validate Schedule against current time
   const startMs = new Date(data.startTime).getTime();
@@ -1159,21 +1210,44 @@ app.get('/api/owner/listings', requireUser, (req: Request, res: Response) => {
 // ----------------------------------------------------
 // PRIVATE DOCUMENT UPLOADS, CONSENT, AND HUMAN REVIEW
 // ----------------------------------------------------
-app.post('/api/documents/consent', requireUser, requireEmailVerified, requireProfileComplete, (req: Request, res: Response) => {
+app.post('/api/documents/consent', (req: Request, res: Response) => {
   if (req.body?.accepted !== true || req.body?.version !== env.DOCUMENT_CONSENT_VERSION) {
     return res.status(400).json({ error: 'Review the current document notice and confirm consent.', code: 'CONSENT_REQUIRED' });
   }
+
+  let userId = req.user?.id;
+  if (!userId) {
+    const email = req.body?.email?.trim().toLowerCase();
+    if (email) {
+      let existingUser = db.getUserByEmail(email);
+      if (!existingUser) {
+        existingUser = db.createUser({
+          email,
+          fullName: req.body?.name || '',
+          phone: req.body?.phone || '',
+          icfaiEnrollment: req.body?.enrollment || null,
+        });
+      }
+      userId = existingUser.id;
+    } else {
+      const guestId = 'usr_guest_' + crypto.randomBytes(6).toString('hex');
+      const guest = db.createUser({
+        id: guestId,
+        email: `${guestId}@riderspath.local`,
+        fullName: req.body?.name || 'Guest Student',
+      });
+      userId = guest.id;
+    }
+  }
+
   const id = crypto.randomUUID();
   sqlite.prepare(`INSERT INTO document_consents (id, user_id, version, accepted_at, ip_address, user_agent) VALUES (?, ?, ?, ?, ?, ?)`)
-    .run(id, req.user!.id, env.DOCUMENT_CONSENT_VERSION, new Date().toISOString(), req.ip, req.headers['user-agent'] || null);
+    .run(id, userId, env.DOCUMENT_CONSENT_VERSION, new Date().toISOString(), req.ip, req.headers['user-agent'] || null);
   res.status(201).json({ id, version: env.DOCUMENT_CONSENT_VERSION });
 });
 
 app.post(
   '/api/upload/documents',
-  requireUser,
-  requireEmailVerified,
-  requireProfileComplete,
   documentUpload.single('file'),
   (req: Request, res: Response, next: NextFunction) => {
     void (async () => {
@@ -1186,9 +1260,16 @@ app.post(
       if (type === 'aadhaar' && !env.REQUIRE_AADHAAR_UPLOAD) {
         return res.status(400).json({ error: 'Aadhaar upload is not enabled.', code: 'DOCUMENT_NOT_ENABLED' });
       }
-      const consent = sqlite.prepare(`SELECT id FROM document_consents WHERE id = ? AND user_id = ? AND version = ?`)
-        .get(consentId, req.user!.id, env.DOCUMENT_CONSENT_VERSION);
+      const consent = sqlite.prepare(`SELECT id, user_id FROM document_consents WHERE id = ? AND version = ?`)
+        .get(consentId, env.DOCUMENT_CONSENT_VERSION) as { id: string; user_id: string } | undefined;
       if (!consent) return res.status(403).json({ error: 'Current document consent is required before upload.', code: 'CONSENT_REQUIRED' });
+
+      // If authenticated, ensure the consent belongs to the logged-in user
+      if (req.user && consent.user_id !== req.user.id) {
+        return res.status(403).json({ error: 'Current document consent is required before upload.', code: 'CONSENT_REQUIRED' });
+      }
+
+      const userId = req.user?.id || consent.user_id;
       const inputMime = detectDocumentMime(file.buffer);
       if (!inputMime) return res.status(400).json({ error: 'Choose a valid JPEG, PNG, WebP, or PDF document.', code: 'INVALID_FILE_TYPE' });
 
@@ -1216,7 +1297,7 @@ app.post(
         sqlite.prepare(`
           INSERT INTO user_documents (id, user_id, consent_id, document_type, object_key, storage_driver, mime_type, byte_size, uploaded_at)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `).run(imageId, req.user!.id, consentId, type, objectKey, env.DOCUMENT_STORAGE_DRIVER, storedMime, storedBytes.length, new Date().toISOString());
+        `).run(imageId, userId, consentId, type, objectKey, env.DOCUMENT_STORAGE_DRIVER, storedMime, storedBytes.length, new Date().toISOString());
         return res.status(201).json({ id: imageId, documentType: type, reviewStatus: 'pending', byteSize: storedBytes.length });
       } catch (error) {
         next(error);
@@ -1225,13 +1306,16 @@ app.post(
   }
 );
 
-app.delete('/api/upload/documents/:id', requireUser, requireEmailVerified, requireProfileComplete, (req: Request, res: Response, next: NextFunction) => {
+app.delete('/api/upload/documents/:id', (req: Request, res: Response, next: NextFunction) => {
   void (async () => {
-    const document = sqlite.prepare(`SELECT id, object_key FROM user_documents WHERE id = ? AND user_id = ? AND booking_id IS NULL AND deleted_at IS NULL`)
-      .get(req.params.id, req.user!.id) as { id: string; object_key: string } | undefined;
+    const document = req.user
+      ? sqlite.prepare(`SELECT id, object_key FROM user_documents WHERE id = ? AND user_id = ? AND booking_id IS NULL AND deleted_at IS NULL`)
+          .get(req.params.id, req.user.id) as { id: string; object_key: string } | undefined
+      : sqlite.prepare(`SELECT id, object_key FROM user_documents WHERE id = ? AND booking_id IS NULL AND deleted_at IS NULL`)
+          .get(req.params.id) as { id: string; object_key: string } | undefined;
     if (!document) return res.status(404).json({ error: 'Unattached document not found.', code: 'DOCUMENT_NOT_FOUND' });
     await deletePrivateDocument(document.object_key);
-    sqlite.prepare('DELETE FROM user_documents WHERE id = ? AND user_id = ? AND booking_id IS NULL').run(document.id, req.user!.id);
+    sqlite.prepare('DELETE FROM user_documents WHERE id = ? AND booking_id IS NULL').run(document.id);
     res.json({ success: true });
   })().catch(next);
 });

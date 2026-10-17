@@ -181,6 +181,10 @@ export const BookingCreateSchema = z.object({
   documentIds: z.array(z.string().uuid()).min(2).max(3),
   agreedToTermsVersion: z.string(),
   idempotencyKey: z.string().min(8),
+  renterName: z.string().trim().min(2, 'Name is required').max(120).optional(),
+  renterEmail: z.string().trim().email('Valid email is required').optional(),
+  renterPhone: z.string().trim().min(10, 'Valid phone number is required').max(20).optional(),
+  renterEnrollment: z.string().trim().min(2, 'Enrollment/College ID is required').max(30).optional(),
 });
 export type BookingCreate = z.infer<typeof BookingCreateSchema>;
 
