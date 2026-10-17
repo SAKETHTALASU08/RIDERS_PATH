@@ -1,8 +1,14 @@
 {
-  "buildCommand": "npm install && npm run build:web",
+  "buildCommand": "node scripts/vercel-build.mjs",
   "outputDirectory": "dist/web",
-  "framework": null,
   "rewrites": [
-    { "source": "/api/:path*", "destination": "https://riders-path-api.onrender.com/api/:path*" }
+    {
+      "source": "/api/:path*",
+      "destination": "https://riders-path.onrender.com/api/:path*"
+    },
+    {
+      "source": "/(.*)",
+      "destination": "/index.html"
+    }
   ]
 }
