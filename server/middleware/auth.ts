@@ -48,8 +48,58 @@ declare global {
 }
 
 // ----------------------------------------------------
-// CSRF & ORIGIN PROTECTION MIDDLEWARE
+// CORS & CSRF ORIGIN HELPERS & PROTECTION MIDDLEWARE
 // ----------------------------------------------------
+export function parseAllowedOrigins(originConfig?: string): string[] {
+  if (!originConfig) return [];
+  return originConfig
+    .split(',')
+    .map((o) => o.trim().toLowerCase().replace(/\/+$/, ''))
+    .filter(Boolean);
+}
+
+export function getAllowedStudentOrigins(): string[] {
+  const custom = parseAllowedOrigins(env.CORS_ORIGIN);
+  const defaults = [
+    'http://localhost:3000',
+    'http://localhost:5173',
+    'http://127.0.0.1:3000',
+    'http://127.0.0.1:5173',
+    'https://riders-path.vercel.app',
+    'https://riders-path-student.vercel.app',
+  ];
+  return Array.from(new Set([...custom, ...defaults]));
+}
+
+export function getAllowedAdminOrigins(): string[] {
+  const custom = parseAllowedOrigins(env.ADMIN_CORS_ORIGIN);
+  const defaults = [
+    'http://localhost:5174',
+    'http://127.0.0.1:5174',
+    'https://riders-path-admin.vercel.app',
+    'https://riders-path.vercel.app',
+    'https://riders-path-student.vercel.app',
+  ];
+  return Array.from(new Set([...custom, ...defaults]));
+}
+
+export function isOriginAllowed(origin: string, allowedOrigins: string[]): boolean {
+  if (!origin) return true;
+  const normalized = origin.trim().toLowerCase().replace(/\/+$/, '');
+  if (allowedOrigins.includes(normalized)) return true;
+
+  try {
+    const url = new URL(normalized);
+    // Allow any vercel deployment preview for this app
+    if (url.hostname.endsWith('.vercel.app') && url.hostname.includes('riders-path')) {
+      return true;
+    }
+  } catch {
+    return false;
+  }
+  return false;
+}
+
 export function verifyCsrfOrigin(req: Request, res: Response, next: NextFunction) {
   // Safe HTTP read methods skip CSRF origin check
   if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) {
@@ -64,16 +114,14 @@ export function verifyCsrfOrigin(req: Request, res: Response, next: NextFunction
   }
 
   try {
-    const originHost = new URL(origin).origin;
+    const originHost = new URL(origin).origin.toLowerCase().replace(/\/+$/, '');
     const adminPath = req.path.startsWith('/api/admin');
-    const allowed = adminPath
-      ? [env.ADMIN_CORS_ORIGIN, 'http://localhost:5174', 'http://127.0.0.1:5174']
-      : [env.CORS_ORIGIN, 'http://localhost:3000', 'http://localhost:5173', 'http://127.0.0.1:3000', 'http://127.0.0.1:5173'];
-    if (!allowed.includes(originHost)) {
-      return res.status(403).json({ error: 'CSRF Protection: Cross-origin request blocked' });
+    const allowed = adminPath ? getAllowedAdminOrigins() : getAllowedStudentOrigins();
+    if (!isOriginAllowed(originHost, allowed)) {
+      return res.status(403).json({ error: 'CSRF Protection: Cross-origin request blocked', code: 'CSRF_ORIGIN_BLOCKED' });
     }
   } catch {
-    return res.status(403).json({ error: 'CSRF Protection: Invalid request origin' });
+    return res.status(403).json({ error: 'CSRF Protection: Invalid request origin', code: 'CSRF_ORIGIN_INVALID' });
   }
 
   const cookieName = req.path.startsWith('/api/admin') ? ADMIN_CSRF_COOKIE : CSRF_COOKIE;

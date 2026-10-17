@@ -91,12 +91,14 @@ async function request<T>(
         status: response.status,
       };
     }
+    const serverMessage = errorData.error || errorData.message;
     throw {
       ...errorData,
-      // Keep implementation details and proxy error pages out of student-facing UI.
-      message: response.status >= 500
-        ? 'The service is having trouble right now. Please try again shortly.'
-        : errorData.message || errorData.error || 'An unexpected server error occurred',
+      message: serverMessage && !serverMessage.startsWith('<!DOCTYPE')
+        ? serverMessage
+        : (response.status >= 500
+          ? 'The service is having trouble right now. Please try again shortly.'
+          : 'An unexpected server error occurred'),
       status: errorData.status || response.status,
     };
   }

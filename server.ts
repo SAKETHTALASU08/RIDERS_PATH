@@ -20,6 +20,9 @@ import {
   ADMIN_SESSION_COOKIE,
   CSRF_COOKIE,
   ADMIN_CSRF_COOKIE,
+  getAllowedStudentOrigins,
+  getAllowedAdminOrigins,
+  isOriginAllowed,
 } from './server/middleware/auth';
 import {
   globalLimiter,
@@ -66,7 +69,7 @@ app.use(
         styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
         fontSrc: ["'self'", 'https://fonts.gstatic.com'],
         imgSrc: ["'self'", 'data:', 'https://images.unsplash.com', 'blob:'],
-        connectSrc: ["'self'", env.CORS_ORIGIN, env.ADMIN_CORS_ORIGIN],
+        connectSrc: ["'self'", ...getAllowedStudentOrigins(), ...getAllowedAdminOrigins()],
       },
     },
     crossOriginEmbedderPolicy: false,
@@ -75,13 +78,13 @@ app.use(
 
 app.use((req, res, next) => {
   const adminEndpoint = req.path.startsWith('/api/admin/');
-  const allowedOrigins = adminEndpoint
-    ? [env.ADMIN_CORS_ORIGIN, 'http://localhost:5174', 'http://127.0.0.1:5174']
-    : [env.CORS_ORIGIN, 'http://localhost:3000', 'http://localhost:5173', 'http://127.0.0.1:3000', 'http://127.0.0.1:5173'];
+  const allowedOrigins = adminEndpoint ? getAllowedAdminOrigins() : getAllowedStudentOrigins();
   cors({
     origin: (origin, callback) => {
-      if (!origin || allowedOrigins.includes(origin)) return callback(null, true);
-      callback(new Error('CORS origin unauthorized'));
+      if (!origin || isOriginAllowed(origin, allowedOrigins)) {
+        return callback(null, true);
+      }
+      callback(null, false);
     },
     credentials: true,
   })(req, res, next);
@@ -1446,12 +1449,13 @@ app.get('/api/admin/actions', requireAdmin, (_req: Request, res: Response) => {
 // ----------------------------------------------------
 app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
   console.error('[API ERROR]', err);
-  const status = err.status || err.statusCode || 500;
-  const message = err.message || 'An error occurred';
+  const isCorsError = typeof err.message === 'string' && (err.message.includes('CORS') || err.message.includes('Cross-origin'));
+  const status = isCorsError ? 403 : (err.status || err.statusCode || 500);
+  const message = isCorsError ? 'Cross-origin request blocked.' : (err.message || 'An error occurred');
 
   res.status(status).json({
     error: message,
-    code: err.code || 'SERVER_ERROR',
+    code: err.code || (status === 403 ? 'FORBIDDEN' : (status === 500 ? 'SERVER_ERROR' : 'REQUEST_ERROR')),
   });
 });
 

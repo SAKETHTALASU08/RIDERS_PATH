@@ -16,7 +16,7 @@ const EnvSchema = z.object({
   CORS_ORIGIN: z.string().default('http://localhost:5173'),
   ADMIN_CORS_ORIGIN: z.string().default('http://localhost:5174'),
   DOCUMENT_STORAGE_DRIVER: z.enum(['local', 's3']).default('local'),
-  DOCUMENT_ENCRYPTION_KEY: z.string().optional(),
+  DOCUMENT_ENCRYPTION_KEY: z.string().default('a99MOIQiZZ19lq0iFAiPu2/qEBEVqN+LJXGhmgEWiO8='),
   DOCUMENT_S3_BUCKET: z.string().optional(),
   DOCUMENT_S3_REGION: z.string().default('ap-south-1'),
   DOCUMENT_S3_ENDPOINT: z.string().optional(),
@@ -38,7 +38,8 @@ const EnvSchema = z.object({
   OTP_HMAC_SECRET: z
     .string()
     .min(32, 'OTP_HMAC_SECRET must be at least 32 bytes (256 bits) for HMAC-SHA256')
-    .refine((value) => Buffer.byteLength(value, 'utf8') >= 32, 'OTP_HMAC_SECRET must be at least 32 bytes'),
+    .refine((value) => Buffer.byteLength(value, 'utf8') >= 32, 'OTP_HMAC_SECRET must be at least 32 bytes')
+    .default('development_insecure_otp_hmac_secret_32_bytes_min'),
   OTP_TTL_MINUTES: z.coerce.number().int().positive().default(10),
   OTP_MAX_ATTEMPTS: z.coerce.number().int().positive().default(5),
   OTP_RESEND_COOLDOWN_SECONDS: z.coerce.number().int().positive().default(60),
@@ -73,6 +74,9 @@ const EnvSchema = z.object({
       if (!config.DOCUMENT_S3_KMS_KEY_ID) {
         ctx.addIssue({ code: 'custom', path: ['DOCUMENT_S3_KMS_KEY_ID'], message: 'Production S3 document storage requires a KMS key id' });
       }
+    }
+    if (!process.env.OTP_HMAC_SECRET || process.env.OTP_HMAC_SECRET === 'development_insecure_otp_hmac_secret_32_bytes_min') {
+      ctx.addIssue({ code: 'custom', path: ['OTP_HMAC_SECRET'], message: 'Production requires a secure, non-default OTP_HMAC_SECRET environment variable' });
     }
   }
   if (config.DOCUMENT_STORAGE_DRIVER === 'local' && config.NODE_ENV !== 'test') {
