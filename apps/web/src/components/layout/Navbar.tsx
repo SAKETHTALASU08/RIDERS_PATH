@@ -20,14 +20,14 @@ export const Navbar: React.FC = () => {
   ];
 
   return (
-    <header className="sticky top-0 z-40 w-full bg-neutral-950/85 backdrop-blur-md border-b border-neutral-800/80">
+    <header className="sticky top-0 z-40 w-full bg-[#1E293B]/80 backdrop-blur-md border-b border-slate-800/90 shadow-sm">
       <div className="max-w-7xl mx-auto px-5 sm:px-8 h-[68px] flex items-center justify-between">
         {/* Brand Logo */}
         <Link
           to="/"
-          className="flex items-center gap-2.5 text-neutral-100 hover:text-amber-400 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 rounded-lg -ml-1 p-1"
+          className="flex items-center gap-2.5 text-slate-100 hover:text-amber-500 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 rounded-lg -ml-1 p-1"
         >
-          <div className="w-9 h-9 rounded-xl bg-amber-500 flex items-center justify-center text-slate-950 font-black shadow-md shadow-amber-500/20">
+          <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-amber-500 to-orange-500 flex items-center justify-center text-slate-950 font-black shadow-md shadow-orange-500/20">
             <Bike className="w-5 h-5 stroke-[2.5]" aria-hidden="true" />
           </div>
           <div className="flex flex-col">
