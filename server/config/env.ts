@@ -12,7 +12,7 @@ const EnvSchema = z.object({
   // Salted bcrypt hash of default admin password (admin123!Safe) for development
   ADMIN_PASSWORD_HASH: z
     .string()
-    .default('$2a$10$wE6O6Rkm3y1rV7YVp5QeEeZcK/25K4V5f0E4y39mO54kG8Fw6p3jS'),
+    .default('$2b$10$3TtKmd/zmnedPLgBKwdW7OWhbwESHeckMK42.M.HsBOmOSb2ju7.O'),
   CORS_ORIGIN: z.string().default('http://localhost:5173'),
   ADMIN_CORS_ORIGIN: z.string().default('http://localhost:5174'),
   DOCUMENT_STORAGE_DRIVER: z.enum(['local', 's3']).default('local'),
