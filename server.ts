@@ -230,72 +230,80 @@ function toUserProfile(user: any) {
   };
 }
 
-app.post('/api/auth/otp/request', async (req: Request, res: Response) => {
+app.post('/api/auth/otp/request', async (req: Request, res: Response, next: NextFunction) => {
   const startedAt = Date.now();
-  const parseResult = OtpRequestSchema.safeParse(req.body);
-  if (!parseResult.success) {
-    return res.status(400).json({
-      error: 'Please enter a valid email address',
-      code: 'INVALID_EMAIL',
-    });
-  }
+  try {
+    const parseResult = OtpRequestSchema.safeParse(req.body);
+    if (!parseResult.success) {
+      return res.status(400).json({
+        error: 'Please enter a valid email address',
+        code: 'INVALID_EMAIL',
+      });
+    }
 
-  const { email } = parseResult.data;
-  const normalizedEmail = email.trim().toLowerCase();
-  const emailHash = crypto.createHash('sha256').update(normalizedEmail).digest('hex').substring(0, 16);
-  db.logAudit({
-    actorId: emailHash,
-    actorRole: 'student',
-    action: 'OTP_REQUESTED',
-    targetType: 'auth',
-    targetId: emailHash,
-    ipAddress: req.ip,
-    userAgent: req.headers['user-agent'],
-  });
-  const clientIp = req.ip || '127.0.0.1';
-  const reservation = db.reserveOtpSend(normalizedEmail, clientIp, {
-    cooldownSeconds: env.OTP_RESEND_COOLDOWN_SECONDS,
-    maxPerEmailPerHour: env.OTP_MAX_SENDS_PER_HOUR,
-    maxPerIpPerHour: env.OTP_MAX_SENDS_PER_IP_PER_HOUR,
-  });
-  if (!reservation.allowed) {
+    const { email } = parseResult.data;
+    const normalizedEmail = email.trim().toLowerCase();
+    const emailHash = crypto.createHash('sha256').update(normalizedEmail).digest('hex').substring(0, 16);
+    db.logAudit({
+      actorId: emailHash,
+      actorRole: 'student',
+      action: 'OTP_REQUESTED',
+      targetType: 'auth',
+      targetId: emailHash,
+      ipAddress: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
+    const clientIp = req.ip || '127.0.0.1';
+    const reservation = db.reserveOtpSend(normalizedEmail, clientIp, {
+      cooldownSeconds: env.OTP_RESEND_COOLDOWN_SECONDS,
+      maxPerEmailPerHour: env.OTP_MAX_SENDS_PER_HOUR,
+      maxPerIpPerHour: env.OTP_MAX_SENDS_PER_IP_PER_HOUR,
+    });
+    if (!reservation.allowed) {
+      await keepOtpRequestTimingSimilar(startedAt);
+      return res.status(429).json({
+        error: 'Too many verification requests. Please try again later.',
+        code: 'OTP_RATE_LIMITED',
+        cooldownSeconds: reservation.retryAfterSeconds,
+        retryAfterSeconds: reservation.retryAfterSeconds,
+      });
+    }
+
+    // 4. Generate random 6-digit numeric OTP and compute HMAC
+    const code = `${crypto.randomInt(100000, 1000000)}`;
+    const codeHash = computeOtpHmac(normalizedEmail, code);
+
+    // 5. Invalidate any earlier unused code for this email
+    db.invalidateEarlierOtpCodes(normalizedEmail);
+
+    // The send log was reserved atomically before dispatch for durable rate limiting.
+    const otpRecord = db.storeOtp(normalizedEmail, codeHash, env.OTP_TTL_MINUTES, 'PENDING');
+
+    // Keep SMTP latency out of the response path. The code cannot be verified until
+    // delivery succeeds, and a failed delivery removes the pending record.
+    void Promise.resolve()
+      .then(() => getMailer().sendOtpEmail({
+        toEmail: normalizedEmail,
+        code,
+        validityMinutes: env.OTP_TTL_MINUTES,
+        expiresAt: otpRecord.expiresAt,
+      }))
+      .then(() => db.markOtpReady(otpRecord.id))
+      .catch((err) => {
+        console.error('[OTP MAILER ERROR]', err);
+        db.deleteOtp(otpRecord.id);
+      });
+
     await keepOtpRequestTimingSimilar(startedAt);
-    return res.status(429).json({
-      error: 'Too many verification requests. Please try again later.',
-      code: 'OTP_RATE_LIMITED',
-      cooldownSeconds: reservation.retryAfterSeconds,
-      retryAfterSeconds: reservation.retryAfterSeconds,
+    res.json({
+      success: true,
+      message: GENERIC_OTP_REQUEST_MESSAGE,
+      cooldownSeconds: env.OTP_RESEND_COOLDOWN_SECONDS,
     });
+  } catch (err) {
+    console.error('[OTP REQUEST EXCEPTION]', err);
+    next(err);
   }
-
-  // 4. Generate random 6-digit numeric OTP and compute HMAC
-  const code = `${crypto.randomInt(100000, 1000000)}`;
-  const codeHash = computeOtpHmac(normalizedEmail, code);
-
-  // 5. Invalidate any earlier unused code for this email
-  db.invalidateEarlierOtpCodes(normalizedEmail);
-
-  // The send log was reserved atomically before dispatch for durable rate limiting.
-  const otpRecord = db.storeOtp(normalizedEmail, codeHash, env.OTP_TTL_MINUTES, 'PENDING');
-
-  // Keep SMTP latency out of the response path. The code cannot be verified until
-  // delivery succeeds, and a failed delivery removes the pending record.
-  void Promise.resolve()
-    .then(() => getMailer().sendOtpEmail({
-      toEmail: normalizedEmail,
-      code,
-      validityMinutes: env.OTP_TTL_MINUTES,
-      expiresAt: otpRecord.expiresAt,
-    }))
-    .then(() => db.markOtpReady(otpRecord.id))
-    .catch(() => db.deleteOtp(otpRecord.id));
-
-  await keepOtpRequestTimingSimilar(startedAt);
-  res.json({
-    success: true,
-    message: GENERIC_OTP_REQUEST_MESSAGE,
-    cooldownSeconds: env.OTP_RESEND_COOLDOWN_SECONDS,
-  });
 });
 
 app.post('/api/auth/otp/verify', authLimiter, (req: Request, res: Response) => {
@@ -1437,9 +1445,10 @@ app.get('/api/admin/actions', requireAdmin, (_req: Request, res: Response) => {
 // GLOBAL ERROR HANDLER (NEVER LEAKS STACK TRACES)
 // ----------------------------------------------------
 app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
+  console.error('[API ERROR]', err);
   const status = err.status || err.statusCode || 500;
   const message = status === 500 && env.NODE_ENV === 'production'
-    ? 'An internal server error occurred. Please contact campus desk.'
+    ? (err.message || 'An internal server error occurred. Please contact campus desk.')
     : err.message || 'An error occurred';
 
   res.status(status).json({
