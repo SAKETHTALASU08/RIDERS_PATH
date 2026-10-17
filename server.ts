@@ -1447,9 +1447,7 @@ app.get('/api/admin/actions', requireAdmin, (_req: Request, res: Response) => {
 app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
   console.error('[API ERROR]', err);
   const status = err.status || err.statusCode || 500;
-  const message = status === 500 && env.NODE_ENV === 'production'
-    ? (err.message || 'An internal server error occurred. Please contact campus desk.')
-    : err.message || 'An error occurred';
+  const message = err.message || 'An error occurred';
 
   res.status(status).json({
     error: message,
