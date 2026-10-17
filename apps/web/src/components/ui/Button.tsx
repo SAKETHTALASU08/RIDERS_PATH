@@ -36,13 +36,13 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
 
     const variantStyles = {
       primary:
-        'bg-amber-500 text-slate-950 hover:bg-amber-400 active:bg-amber-600 font-semibold shadow-sm shadow-amber-500/10',
+        'bg-[#F97316] text-slate-950 hover:bg-[#ea580c] active:bg-[#c2410c] font-semibold shadow-md shadow-orange-500/20',
       secondary:
-        'bg-neutral-800 text-neutral-100 hover:bg-neutral-700 active:bg-neutral-800 border border-neutral-700/60',
+        'bg-[#1E293B] text-slate-100 hover:bg-[#334155] active:bg-[#1E293B] border border-slate-700/80',
       outline:
-        'bg-transparent text-neutral-200 border border-neutral-700 hover:border-neutral-500 hover:bg-neutral-900',
+        'bg-transparent text-slate-200 border border-slate-700 hover:border-slate-500 hover:bg-[#1E293B]/70',
       ghost:
-        'bg-transparent text-neutral-300 hover:text-neutral-100 hover:bg-neutral-800/60',
+        'bg-transparent text-slate-300 hover:text-white hover:bg-slate-800/60',
       danger:
         'bg-rose-600 text-white hover:bg-rose-500 active:bg-rose-700 font-medium',
     };

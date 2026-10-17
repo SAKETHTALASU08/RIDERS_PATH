@@ -28,19 +28,19 @@
   --font-sans: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
   --font-mono: 'JetBrains Mono', monospace;
 
-  /* Brand and layout tokens. The dark palette is the default theme. */
-  --color-bg-base: #0a0a0a;
-  --color-bg-surface: #141414;
-  --color-bg-surface-elevated: #1e1e1e;
-  --color-border: #2e2e2e;
-  --color-border-subtle: #242424;
-  --color-text-primary: #f5f5f5;
-  --color-text-secondary: #a3a3a3;
-  --color-text-muted: #909090;
+  /* Brand and layout tokens — Cyber-Mobility Slate & Electric Orange */
+  --color-bg-base: #0f172a;
+  --color-bg-surface: #1e293b;
+  --color-bg-surface-elevated: #334155;
+  --color-border: #334155;
+  --color-border-subtle: #1e293b;
+  --color-text-primary: #f8fafc;
+  --color-text-secondary: #cbd5e1;
+  --color-text-muted: #94a3b8;
   /* Raise small supporting text above the 4.5:1 AA contrast threshold. */
-  --color-neutral-500: #909090;
-  --color-accent: #f59e0b;
-  --color-accent-hover: #d97706;
+  --color-neutral-500: #94a3b8;
+  --color-accent: #f97316;
+  --color-accent-hover: #ea580c;
   --radius-sm: 6px;
   --radius-md: 10px;
   --radius-lg: 14px;

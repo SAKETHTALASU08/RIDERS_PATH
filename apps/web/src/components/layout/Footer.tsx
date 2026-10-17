@@ -5,34 +5,34 @@ import { PLATFORM_CONFIG } from '@riders-path/shared';
 
 export const Footer: React.FC = () => {
   return (
-    <footer className="w-full bg-neutral-950 border-t border-neutral-900 mt-20 text-neutral-400 text-xs">
+    <footer className="w-full bg-[#0F172A] border-t border-slate-800 mt-20 text-slate-400 text-xs">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 py-12">
         <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-8 mb-12">
           {/* Brand Col */}
           <div className="flex flex-col gap-3">
-            <div className="flex items-center gap-2 text-neutral-100">
-              <div className="w-7 h-7 rounded-lg bg-amber-500 flex items-center justify-center text-slate-950 font-black">
+            <div className="flex items-center gap-2 text-slate-100">
+              <div className="w-7 h-7 rounded-lg bg-[#F97316] flex items-center justify-center text-slate-950 font-black shadow-sm shadow-orange-500/20">
                 <Bike className="w-4 h-4 stroke-[2.5]" />
               </div>
-              <span className="font-heading font-bold text-sm tracking-tight">
+              <span className="font-heading font-bold text-sm tracking-tight text-[#F8FAFC]">
                 RIDERS PATH
               </span>
             </div>
-            <p className="text-neutral-400 leading-relaxed">
+            <p className="text-slate-400 leading-relaxed">
               Student peer-to-peer bike sharing facilitator for {PLATFORM_CONFIG.campusName}.
             </p>
-            <div className="flex items-center gap-2 text-[11px] font-mono text-amber-400/90 bg-amber-500/10 px-3 py-1.5 rounded-lg border border-amber-500/20 w-fit">
+            <div className="flex items-center gap-2 text-[11px] font-mono text-orange-400 bg-orange-500/10 px-3 py-1.5 rounded-full border border-orange-500/20 w-fit">
               <span>Campus Community Portal</span>
             </div>
           </div>
 
           {/* Hubs */}
           <div className="flex flex-col gap-2.5">
-            <span className="text-neutral-200 font-semibold uppercase tracking-wider text-[11px]">
+            <span className="text-slate-200 font-semibold uppercase tracking-wider text-[11px]">
               Campus Pickup Hubs
             </span>
             {PLATFORM_CONFIG.hubs.map((hub) => (
-              <span key={hub.id} className="text-neutral-400 hover:text-neutral-200 transition-colors">
+              <span key={hub.id} className="text-slate-400 hover:text-slate-200 transition-colors">
                 {hub.name} · {hub.operatingHours}
               </span>
             ))}
@@ -40,22 +40,22 @@ export const Footer: React.FC = () => {
 
           {/* Trust & Policies */}
           <div className="flex flex-col gap-2.5">
-            <span className="text-neutral-200 font-semibold uppercase tracking-wider text-[11px]">
+            <span className="text-slate-200 font-semibold uppercase tracking-wider text-[11px]">
               Compliance & Safety
             </span>
-            <Link to="/terms" className="hover:text-amber-400 transition-colors flex items-center gap-1.5">
+            <Link to="/terms" className="hover:text-orange-400 transition-colors flex items-center gap-1.5">
               <FileText className="w-3.5 h-3.5" />
               <span>Campus Rental Terms ({PLATFORM_CONFIG.termsVersion})</span>
             </Link>
-            <Link to="/privacy" className="hover:text-amber-400 transition-colors flex items-center gap-1.5">
+            <Link to="/privacy" className="hover:text-orange-400 transition-colors flex items-center gap-1.5">
               <Lock className="w-3.5 h-3.5" />
               <span>Student Privacy Notice</span>
             </Link>
-            <Link to="/refund-policy" className="hover:text-amber-400 transition-colors flex items-center gap-1.5">
+            <Link to="/refund-policy" className="hover:text-orange-400 transition-colors flex items-center gap-1.5">
               <Shield className="w-3.5 h-3.5" />
               <span>Security Deposit & Refund Policy</span>
             </Link>
-            <Link to="/safety" className="hover:text-amber-400 transition-colors flex items-center gap-1.5">
+            <Link to="/safety" className="hover:text-orange-400 transition-colors flex items-center gap-1.5">
               <AlertCircle className="w-3.5 h-3.5" />
               <span>Mandatory Safety Guidelines</span>
             </Link>
