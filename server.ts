@@ -964,10 +964,10 @@ app.post(
     const createdBooking = db.createBookingAtomic({
       bikeId: bike.id,
       renterId: user.id,
-      renterName: user.fullName,
-      renterPhone: user.phone,
-      renterEmail: user.email,
-      renterEnrollment: user.icfaiEnrollment,
+      renterName: user.name || renterName,
+      renterPhone: user.phone || renterPhone,
+      renterEmail: user.email || renterEmail,
+      renterEnrollment: user.enrollmentNumber || renterEnrollment,
       pickupHubId: data.pickupHubId,
       pickupHubName: hub.name,
       startTime: data.startTime,
@@ -1008,7 +1008,7 @@ app.post(
     if (err.message === 'IDEMPOTENCY_KEY_CONFLICT') {
       return res.status(409).json({ error: 'This booking request key has already been used.', code: 'IDEMPOTENCY_CONFLICT' });
     }
-    res.status(500).json({ error: 'Failed to create booking' });
+    res.status(500).json({ error: 'Failed to create booking', detail: env.NODE_ENV !== 'production' ? err?.message : undefined });
   }
 });
 
