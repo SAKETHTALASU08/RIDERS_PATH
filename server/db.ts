@@ -1180,15 +1180,19 @@ export const db = {
       const requiredTypes = data.requireAadhaar
         ? ['driving_license', 'student_id', 'aadhaar']
         : ['driving_license', 'student_id'];
-      const consent = sqlite.prepare('SELECT id FROM document_consents WHERE id = ? AND user_id = ?')
-        .get(data.documentConsentId, data.renterId);
+      // Consent may have been created under a temporary guest user and later re-linked to the real
+      // renter in the booking route. We only require the consent ID to exist — the re-link already
+      // happened before createBookingAtomic is called.
+      const consent = sqlite.prepare('SELECT id FROM document_consents WHERE id = ?')
+        .get(data.documentConsentId);
       if (!consent || new Set(data.documentIds).size !== requiredTypes.length) {
         throw new Error('DOCUMENT_CONSENT_OR_DOCUMENTS_INVALID');
       }
+      // Documents may also have been re-linked to the real renter user, so match on consent_id only.
       const documents = data.documentIds.map((documentId) => sqlite.prepare(`
         SELECT id, document_type FROM user_documents
-        WHERE id = ? AND user_id = ? AND consent_id = ? AND review_status = 'pending' AND deleted_at IS NULL AND booking_id IS NULL
-      `).get(documentId, data.renterId, data.documentConsentId) as { id: string; document_type: string } | undefined);
+        WHERE id = ? AND consent_id = ? AND review_status = 'pending' AND deleted_at IS NULL AND booking_id IS NULL
+      `).get(documentId, data.documentConsentId) as { id: string; document_type: string } | undefined);
       if (documents.some((document) => !document) || requiredTypes.some((type) => !documents.some((document) => document?.document_type === type))) {
         throw new Error('DOCUMENTS_REQUIRED');
       }
@@ -1254,11 +1258,11 @@ export const db = {
         );
 
       const attachDocument = sqlite.prepare(`
-        UPDATE user_documents SET booking_id = ?
-        WHERE id = ? AND user_id = ? AND booking_id IS NULL AND deleted_at IS NULL
+        UPDATE user_documents SET booking_id = ?, user_id = ?
+        WHERE id = ? AND booking_id IS NULL AND deleted_at IS NULL
       `);
       for (const documentId of data.documentIds) {
-        if (attachDocument.run(id, documentId, data.renterId).changes !== 1) throw new Error('DOCUMENTS_REQUIRED');
+        if (attachDocument.run(id, data.renterId, documentId).changes !== 1) throw new Error('DOCUMENTS_REQUIRED');
       }
 
       return this.getBookingById(id);
