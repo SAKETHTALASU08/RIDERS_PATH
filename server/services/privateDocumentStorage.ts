@@ -41,7 +41,8 @@ export async function storePrivateDocument(id: string, bytes: Buffer, contentTyp
     }));
     return `student-documents/${id}`;
   }
-  if (env.NODE_ENV === 'production') throw new Error('Local document storage is disabled in production');
+  // Local storage is allowed when DOCUMENT_STORAGE_DRIVER is 'local' (default).
+  // Files are stored encrypted on the server's local disk.
   await fs.mkdir(localDirectory, { recursive: true, mode: 0o700 });
   const iv = crypto.randomBytes(12);
   const cipher = crypto.createCipheriv('aes-256-gcm', encryptionKey(), iv);
